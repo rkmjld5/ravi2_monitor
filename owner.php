@@ -1,40 +1,39 @@
 <?php
 /*
-    PROJECT: ravi2_patient
-    FILE: owner.php
-
-    PURPOSE:
-    Owner / Administrator dashboard.
-
-    DATABASE:
-    patient_monitor
-
-    IMPORTANT:
-    1. Uses config.php and the $conn MySQLi connection.
-    2. Only an authenticated owner can open this page.
-    3. Uses the existing patients table.
-    4. Uses the existing patient_devices table.
-    5. Uses the existing web_users table.
-    6. Does not create or modify database tables.
-    7. Patient login remains in login.php.
-    8. Owner login remains in owner_login.php.
+|--------------------------------------------------------------------------
+| PROJECT: ravi2_patient
+| FILE: owner.php
+|--------------------------------------------------------------------------
+| OWNER / ADMINISTRATOR DASHBOARD
+|
+| Main functions:
+| 1. Register patients
+| 2. Assign devices to patients
+| 3. Enable / Disable devices
+| 4. Delete device assignments
+| 5. Create and manage patient login accounts
+| 6. Edit patient login accounts
+|
+| Database: patient_monitor
+| Connection: config.php ($conn)
+| Database access: MySQLi
+| Time zone: Asia/Kolkata
+|--------------------------------------------------------------------------
 */
-
-// --------------------------------------------------
-// 1. DATABASE CONNECTION AND SESSION
-// --------------------------------------------------
 
 require_once __DIR__ . "/config.php";
 
+/*--------------------------------------------------------------
+  1. CHECK DATABASE CONNECTION
+--------------------------------------------------------------*/
+
 if (!isset($conn) || !($conn instanceof mysqli)) {
-    die("Database connection is not available. Please check config.php.");
+    exit("Database connection is not available.");
 }
 
-date_default_timezone_set("Asia/Kolkata");
-
-// --------------------------------------------------
-// 2. CHECK OWNER LOGIN
-// --------------------------------------------------
+/*--------------------------------------------------------------
+  2. CHECK OWNER / ADMINISTRATOR LOGIN
+--------------------------------------------------------------*/
 
 if (
     empty($_SESSION["owner_logged_in"]) ||
@@ -44,9 +43,9 @@ if (
     exit;
 }
 
-// --------------------------------------------------
-// 3. HELPER FUNCTIONS
-// --------------------------------------------------
+/*--------------------------------------------------------------
+  3. HELPER FUNCTIONS
+--------------------------------------------------------------*/
 
 function owner_escape($value)
 {
@@ -59,7 +58,13 @@ function owner_date_input($value)
         return "";
     }
 
-    return date("Y-m-d\TH:i", strtotime($value));
+    $time = strtotime($value);
+
+    if ($time === false) {
+        return "";
+    }
+
+    return date("Y-m-d\TH:i", $time);
 }
 
 function owner_date_display($value)
@@ -68,7 +73,13 @@ function owner_date_display($value)
         return "Not specified";
     }
 
-    return date("d-m-Y H:i", strtotime($value));
+    $time = strtotime($value);
+
+    if ($time === false) {
+        return owner_escape($value);
+    }
+
+    return date("d-m-Y H:i", $time);
 }
 
 function owner_valid_date($value)
@@ -79,133 +90,105 @@ function owner_valid_date($value)
         return null;
     }
 
-    $value = str_replace("T", " ", $value);
+    $date = DateTime::createFromFormat("Y-m-d\TH:i", $value);
 
-    if (strlen($value) === 16) {
-        $value .= ":00";
-    }
-
-    $date = DateTime::createFromFormat("Y-m-d H:i:s", $value);
-
-    if (!$date || $date->format("Y-m-d H:i:s") !== $value) {
+    if (!$date || $date->format("Y-m-d\TH:i") !== $value) {
         return false;
     }
 
-    return $value;
+    return $date->format("Y-m-d H:i:s");
 }
 
-function owner_redirect_message($message, $type = "success")
+function owner_message($message)
 {
     $_SESSION["owner_message"] = $message;
-    $_SESSION["owner_message_type"] = $type;
-
     header("Location: owner.php");
     exit;
 }
 
-// --------------------------------------------------
-// 4. CREATE CSRF SECURITY TOKEN
-// --------------------------------------------------
+/*--------------------------------------------------------------
+  4. CSRF SECURITY TOKEN
+--------------------------------------------------------------*/
 
 if (empty($_SESSION["owner_csrf"])) {
     $_SESSION["owner_csrf"] = bin2hex(random_bytes(32));
 }
 
-// --------------------------------------------------
-// 5. PROCESS OWNER ACTIONS
-// --------------------------------------------------
+$csrf_token = $_SESSION["owner_csrf"];
+
+/*--------------------------------------------------------------
+  5. PROCESS FORM SUBMISSIONS
+--------------------------------------------------------------*/
 
 if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
-    $csrf = $_POST["csrf_token"] ?? "";
+    /* Verify security token */
+
+    $posted_token = $_POST["csrf_token"] ?? "";
 
     if (
-        empty($_SESSION["owner_csrf"]) ||
-        !hash_equals($_SESSION["owner_csrf"], $csrf)
+        !is_string($posted_token) ||
+        !hash_equals($csrf_token, $posted_token)
     ) {
-        owner_redirect_message(
-            "Security verification failed. Please try again.",
-            "error"
-        );
+        owner_message("Security check failed. Please try again.");
     }
 
     $action = $_POST["action"] ?? "";
 
-    // ==============================================
-    // ACTION 1: REGISTER NEW PATIENT
-    // ==============================================
+    /*==========================================================
+      ACTION 1: REGISTER NEW PATIENT
+    ==========================================================*/
 
     if ($action === "register_patient") {
 
         $patient_id = trim($_POST["patient_id"] ?? "");
-        $full_name = trim($_POST["full_name"] ?? "");
-        $age = trim($_POST["age"] ?? "");
-        $gender = trim($_POST["gender"] ?? "");
+        $full_name  = trim($_POST["full_name"] ?? "");
+        $age_input  = trim($_POST["age"] ?? "");
+        $gender     = trim($_POST["gender"] ?? "");
         $blood_group = trim($_POST["blood_group"] ?? "");
-        $contact = trim($_POST["contact"] ?? "");
-        $email = trim($_POST["email"] ?? "");
-        $notes = trim($_POST["notes"] ?? "");
+        $contact    = trim($_POST["contact"] ?? "");
+        $email      = trim($_POST["email"] ?? "");
+        $notes      = trim($_POST["notes"] ?? "");
 
         if ($patient_id === "" || $full_name === "") {
-            owner_redirect_message(
-                "Patient ID and full name are required.",
-                "error"
-            );
+            owner_message("Patient ID and patient name are required.");
         }
 
-        if ($age !== "" && (!ctype_digit($age) || (int)$age > 120)) {
-            owner_redirect_message("Please enter a valid age.", "error");
+        $age = null;
+
+        if ($age_input !== "") {
+            if (!ctype_digit($age_input) || (int)$age_input > 120) {
+                owner_message("Please enter a valid patient age.");
+            }
+
+            $age = (int)$age_input;
         }
 
-        // Check whether this Patient ID already exists.
         $check = $conn->prepare(
             "SELECT patient_id FROM patients WHERE patient_id = ? LIMIT 1"
         );
 
-        if (!$check) {
-            error_log("Patient check error: " . $conn->error);
-            owner_redirect_message("Database error while checking patient.", "error");
-        }
-
         $check->bind_param("s", $patient_id);
         $check->execute();
-        $existing = $check->get_result()->fetch_assoc();
+
+        if ($check->get_result()->num_rows > 0) {
+            $check->close();
+            owner_message("This Patient ID already exists.");
+        }
+
         $check->close();
 
-        if ($existing) {
-            owner_redirect_message(
-                "This Patient ID already exists.",
-                "error"
-            );
-        }
-
-        $age_value = ($age === "") ? null : (int)$age;
-
-        $stmt = $conn->prepare("
-            INSERT INTO patients
-            (
-                patient_id,
-                full_name,
-                age,
-                gender,
-                blood_group,
-                contact,
-                email,
-                notes
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ");
-
-        if (!$stmt) {
-            error_log("Patient registration error: " . $conn->error);
-            owner_redirect_message("Unable to register patient.", "error");
-        }
+        $stmt = $conn->prepare(
+            "INSERT INTO patients
+            (patient_id, full_name, age, gender, blood_group, contact, email, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        );
 
         $stmt->bind_param(
             "ssisssss",
             $patient_id,
             $full_name,
-            $age_value,
+            $age,
             $gender,
             $blood_group,
             $contact,
@@ -213,108 +196,85 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
             $notes
         );
 
-        if ($stmt->execute()) {
+        if (!$stmt->execute()) {
+            $error = $stmt->error;
             $stmt->close();
-
-            owner_redirect_message(
-                "Patient registered successfully. Patient ID: " . $patient_id
-            );
+            owner_message("Could not register patient: " . $error);
         }
 
-        error_log("Patient insert error: " . $stmt->error);
         $stmt->close();
 
-        owner_redirect_message("Patient registration failed.", "error");
+        owner_message("Patient registered successfully.");
     }
 
-    // ==============================================
-    // ACTION 2: ASSIGN OR UPDATE ESP32 DEVICE
-    // ==============================================
+    /*==========================================================
+      ACTION 2: ASSIGN OR UPDATE DEVICE
+    ==========================================================*/
 
-    elseif ($action === "assign_device") {
+    if ($action === "assign_device") {
 
-        $patient_id = trim($_POST["device_patient_id"] ?? "");
         $device_id = trim($_POST["device_id"] ?? "");
+        $patient_id = trim($_POST["device_patient_id"] ?? "");
         $description = trim($_POST["description"] ?? "");
 
         $start_date = owner_valid_date($_POST["start_date_time"] ?? "");
         $end_date = owner_valid_date($_POST["end_date_time"] ?? "");
 
-        if ($patient_id === "" || $device_id === "") {
-            owner_redirect_message(
-                "Patient ID and Device ID are required.",
-                "error"
-            );
+        if ($device_id === "" || $patient_id === "") {
+            owner_message("Device ID and Patient ID are required.");
         }
 
         if ($start_date === false || $end_date === false) {
-            owner_redirect_message("Please enter valid device dates.", "error");
+            owner_message("Please enter valid device assignment dates.");
         }
 
         if (
             $start_date !== null &&
             $end_date !== null &&
-            strtotime($end_date) < strtotime($start_date)
+            strtotime($end_date) <= strtotime($start_date)
         ) {
-            owner_redirect_message(
-                "Device end date cannot be earlier than start date.",
-                "error"
-            );
+            owner_message("Device end date must be later than start date.");
         }
 
-        // Confirm that the patient exists.
+        /* Confirm that the patient exists */
+
         $check = $conn->prepare(
             "SELECT patient_id FROM patients WHERE patient_id = ? LIMIT 1"
         );
 
-        if (!$check) {
-            owner_redirect_message("Database error while checking patient.", "error");
-        }
-
         $check->bind_param("s", $patient_id);
         $check->execute();
-        $patient_exists = $check->get_result()->fetch_assoc();
+
+        if ($check->get_result()->num_rows === 0) {
+            $check->close();
+            owner_message("Patient ID does not exist.");
+        }
+
         $check->close();
 
-        if (!$patient_exists) {
-            owner_redirect_message("Patient ID does not exist.", "error");
-        }
+        /* Check whether this device already has an assignment */
 
-        // Check whether this device already has an assignment.
-        $check = $conn->prepare("
-            SELECT device_id
-            FROM patient_devices
-            WHERE device_id = ?
-            LIMIT 1
-        ");
-
-        if (!$check) {
-            owner_redirect_message("Database error while checking device.", "error");
-        }
+        $check = $conn->prepare(
+            "SELECT device_id FROM patient_devices
+             WHERE device_id = ? LIMIT 1"
+        );
 
         $check->bind_param("s", $device_id);
         $check->execute();
-        $device_exists = $check->get_result()->fetch_assoc();
+
+        $existing_device = $check->get_result()->num_rows > 0;
         $check->close();
 
-        if ($device_exists) {
+        if ($existing_device) {
 
-            // Update the existing device assignment.
-            // Keep its current enabled/disabled setting unchanged.
-
-            $stmt = $conn->prepare("
-                UPDATE patient_devices
-                SET
-                    patient_id = ?,
-                    description = ?,
-                    start_date_time = ?,
-                    end_date_time = ?
-                WHERE device_id = ?
-            ");
-
-            if (!$stmt) {
-                owner_redirect_message("Unable to prepare device update.", "error");
-            }
+            $stmt = $conn->prepare(
+                "UPDATE patient_devices
+                 SET patient_id = ?,
+                     description = ?,
+                     start_date_time = ?,
+                     end_date_time = ?
+                 WHERE device_id = ?"
+            );
 
             $stmt->bind_param(
                 "sssss",
@@ -325,28 +285,14 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 $device_id
             );
 
-            $success = $stmt->execute();
-            $stmt->close();
-
         } else {
 
-            // Create a new device assignment.
-            $stmt = $conn->prepare("
-                INSERT INTO patient_devices
-                (
-                    device_id,
-                    patient_id,
-                    description,
-                    enabled,
-                    start_date_time,
-                    end_date_time
-                )
-                VALUES (?, ?, ?, 1, ?, ?)
-            ");
-
-            if (!$stmt) {
-                owner_redirect_message("Unable to prepare device assignment.", "error");
-            }
+            $stmt = $conn->prepare(
+                "INSERT INTO patient_devices
+                (device_id, patient_id, description, enabled,
+                 start_date_time, end_date_time)
+                VALUES (?, ?, ?, 1, ?, ?)"
+            );
 
             $stmt->bind_param(
                 "sssss",
@@ -356,247 +302,236 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 $start_date,
                 $end_date
             );
+        }
 
-            $success = $stmt->execute();
+        if (!$stmt->execute()) {
+            $error = $stmt->error;
             $stmt->close();
+            owner_message("Could not save device assignment: " . $error);
         }
 
-        if ($success) {
-            owner_redirect_message(
-                "Device assignment saved successfully."
-            );
-        }
+        $stmt->close();
 
-        error_log("Device assignment error: " . $conn->error);
-
-        owner_redirect_message(
-            "Unable to save device assignment. Please check whether the device is already assigned.",
-            "error"
-        );
+        owner_message("Device assignment saved successfully.");
     }
 
-    // ==============================================
-    // ACTION 3: ENABLE OR DISABLE DEVICE
-    // ==============================================
+    /*==========================================================
+      ACTION 3: ENABLE OR DISABLE DEVICE
+    ==========================================================*/
 
-    elseif ($action === "toggle_device") {
+    if ($action === "toggle_device") {
 
         $device_id = trim($_POST["device_id"] ?? "");
         $new_status = (int)($_POST["new_status"] ?? 0);
 
         if ($device_id === "" || !in_array($new_status, [0, 1], true)) {
-            owner_redirect_message("Invalid device request.", "error");
+            owner_message("Invalid device status request.");
         }
 
-        $stmt = $conn->prepare("
-            UPDATE patient_devices
-            SET enabled = ?
-            WHERE device_id = ?
-        ");
-
-        if (!$stmt) {
-            owner_redirect_message("Unable to prepare device status update.", "error");
-        }
+        $stmt = $conn->prepare(
+            "UPDATE patient_devices
+             SET enabled = ?
+             WHERE device_id = ?"
+        );
 
         $stmt->bind_param("is", $new_status, $device_id);
-        $success = $stmt->execute();
+        $stmt->execute();
+
+        $changed = $stmt->affected_rows;
         $stmt->close();
 
-        if ($success) {
-            owner_redirect_message(
-                $new_status === 1
-                    ? "Device enabled successfully."
-                    : "Device disabled successfully."
-            );
-        }
-
-        owner_redirect_message("Unable to change device status.", "error");
+        owner_message(
+            $changed >= 0
+                ? "Device status updated."
+                : "Could not update device status."
+        );
     }
 
-    // ==============================================
-    // ACTION 4: DELETE DEVICE ASSIGNMENT
-    // ==============================================
+    /*==========================================================
+      ACTION 4: DELETE DEVICE ASSIGNMENT
+    ==========================================================*/
 
-    elseif ($action === "delete_device") {
+    if ($action === "delete_device") {
 
         $device_id = trim($_POST["device_id"] ?? "");
 
         if ($device_id === "") {
-            owner_redirect_message("Device ID is missing.", "error");
+            owner_message("Device ID is missing.");
         }
 
-        $stmt = $conn->prepare("
-            DELETE FROM patient_devices
-            WHERE device_id = ?
-        ");
-
-        if (!$stmt) {
-            owner_redirect_message("Unable to prepare device deletion.", "error");
-        }
+        $stmt = $conn->prepare(
+            "DELETE FROM patient_devices WHERE device_id = ?"
+        );
 
         $stmt->bind_param("s", $device_id);
-        $success = $stmt->execute();
+        $stmt->execute();
         $stmt->close();
 
-        if ($success) {
-            owner_redirect_message(
-                "Device assignment deleted. Historical readings have not been deleted."
-            );
-        }
-
-        owner_redirect_message("Unable to delete device assignment.", "error");
+        owner_message(
+            "Device assignment deleted. Historical readings have not been deleted."
+        );
     }
 
-    // ==============================================
-    // ACTION 5: CREATE OR UPDATE PATIENT LOGIN
-    // ==============================================
+    /*==========================================================
+      ACTION 5: CREATE OR EDIT PATIENT LOGIN ACCOUNT
+    ==========================================================*/
 
-    elseif ($action === "save_patient_login") {
+    if ($action === "save_patient_login") {
 
-        $username = trim($_POST["login_username"] ?? "");
-        $password = $_POST["login_password"] ?? "";
+        $login_id = (int)($_POST["login_id"] ?? 0);
+
+        $username = trim($_POST["username"] ?? "");
+        $password = (string)($_POST["password"] ?? "");
         $device_id = trim($_POST["login_device_id"] ?? "");
 
         $valid_from = owner_valid_date($_POST["valid_from"] ?? "");
         $valid_until = owner_valid_date($_POST["valid_until"] ?? "");
 
         if ($username === "" || $device_id === "") {
-            owner_redirect_message(
-                "Patient username and assigned device are required.",
-                "error"
-            );
+            owner_message("Username and device assignment are required.");
         }
 
         if ($valid_from === false || $valid_until === false) {
-            owner_redirect_message("Please enter valid login dates.", "error");
+            owner_message("Please enter valid login validity dates.");
         }
 
         if (
             $valid_from !== null &&
             $valid_until !== null &&
-            strtotime($valid_until) < strtotime($valid_from)
+            strtotime($valid_until) <= strtotime($valid_from)
         ) {
-            owner_redirect_message(
-                "Login expiry cannot be earlier than login start.",
-                "error"
+            owner_message("Login expiry date must be later than start date.");
+        }
+
+        /* Check that the device is assigned and enabled */
+
+        $device_check = $conn->prepare(
+            "SELECT device_id
+             FROM patient_devices
+             WHERE device_id = ?
+               AND enabled = 1
+               AND (start_date_time IS NULL OR start_date_time <= NOW())
+               AND (end_date_time IS NULL OR end_date_time >= NOW())
+             LIMIT 1"
+        );
+
+        $device_check->bind_param("s", $device_id);
+        $device_check->execute();
+
+        $device_available = $device_check->get_result()->num_rows > 0;
+        $device_check->close();
+
+        if (!$device_available) {
+            owner_message(
+                "This device is not currently assigned and enabled. Please check Section 3."
             );
         }
 
-        // Confirm that the device assignment exists and is enabled.
-        $check = $conn->prepare("
-            SELECT device_id
-            FROM patient_devices
-            WHERE device_id = ?
-              AND enabled = 1
-              AND (start_date_time IS NULL OR start_date_time <= NOW())
-              AND (end_date_time IS NULL OR end_date_time >= NOW())
-            LIMIT 1
-        ");
+        /* Check username uniqueness.
+           During editing, exclude the current login account. */
 
-        if (!$check) {
-            owner_redirect_message("Unable to check device assignment.", "error");
+        if ($login_id > 0) {
+
+            $check = $conn->prepare(
+                "SELECT id
+                 FROM web_users
+                 WHERE username = ?
+                   AND id <> ?
+                 LIMIT 1"
+            );
+
+            $check->bind_param("si", $username, $login_id);
+
+        } else {
+
+            $check = $conn->prepare(
+                "SELECT id
+                 FROM web_users
+                 WHERE username = ?
+                 LIMIT 1"
+            );
+
+            $check->bind_param("s", $username);
         }
 
-        $check->bind_param("s", $device_id);
         $check->execute();
-        $assigned_device = $check->get_result()->fetch_assoc();
+
+        if ($check->get_result()->num_rows > 0) {
+            $check->close();
+            owner_message("This username is already in use.");
+        }
+
         $check->close();
 
-        if (!$assigned_device) {
-            owner_redirect_message(
-                "The device is not enabled or is outside its assignment dates.",
-                "error"
+        /*------------------------------------------------------
+          EDIT AN EXISTING PATIENT LOGIN
+        ------------------------------------------------------*/
+
+        if ($login_id > 0) {
+
+            /* Confirm that this is a patient login */
+
+            $check = $conn->prepare(
+                "SELECT id
+                 FROM web_users
+                 WHERE id = ? AND role = 'patient'
+                 LIMIT 1"
             );
-        }
 
-        // Check whether this username already exists.
-        $check = $conn->prepare("
-            SELECT id, role
-            FROM web_users
-            WHERE username = ?
-            LIMIT 1
-        ");
+            $check->bind_param("i", $login_id);
+            $check->execute();
 
-        if (!$check) {
-            owner_redirect_message("Unable to check patient username.", "error");
-        }
+            $login_exists = $check->get_result()->num_rows > 0;
+            $check->close();
 
-        $check->bind_param("s", $username);
-        $check->execute();
-        $existing_login = $check->get_result()->fetch_assoc();
-        $check->close();
-
-        if ($existing_login && $existing_login["role"] !== "patient") {
-            owner_redirect_message(
-                "This username belongs to a non-patient account. Choose another username.",
-                "error"
-            );
-        }
-
-        if ($existing_login) {
-
-            // Update an existing patient login.
-            // If password is blank, keep the existing password.
+            if (!$login_exists) {
+                owner_message("Patient login account was not found.");
+            }
 
             if ($password !== "") {
 
                 if (strlen($password) < 8) {
-                    owner_redirect_message(
-                        "A new password must contain at least 8 characters.",
-                        "error"
-                    );
+                    owner_message("New password must contain at least 8 characters.");
                 }
 
                 $password_hash = password_hash($password, PASSWORD_DEFAULT);
 
-                $stmt = $conn->prepare("
-                    UPDATE web_users
-                    SET
-                        password_hash = ?,
-                        role = 'patient',
-                        device_id = ?,
-                        valid_from = ?,
-                        valid_until = ?
-                    WHERE id = ?
-                      AND role = 'patient'
-                ");
-
-                if (!$stmt) {
-                    owner_redirect_message("Unable to prepare login update.", "error");
-                }
-
-                $login_id = (int)$existing_login["id"];
+                $stmt = $conn->prepare(
+                    "UPDATE web_users
+                     SET username = ?,
+                         device_id = ?,
+                         valid_from = ?,
+                         valid_until = ?,
+                         password_hash = ?
+                     WHERE id = ? AND role = 'patient'"
+                );
 
                 $stmt->bind_param(
-                    "ssssi",
-                    $password_hash,
+                    "sssssi",
+                    $username,
                     $device_id,
                     $valid_from,
                     $valid_until,
+                    $password_hash,
                     $login_id
                 );
 
             } else {
 
-                $stmt = $conn->prepare("
-                    UPDATE web_users
-                    SET
-                        role = 'patient',
-                        device_id = ?,
-                        valid_from = ?,
-                        valid_until = ?
-                    WHERE id = ?
-                      AND role = 'patient'
-                ");
+                /* Blank password means keep the old password */
 
-                if (!$stmt) {
-                    owner_redirect_message("Unable to prepare login update.", "error");
-                }
-
-                $login_id = (int)$existing_login["id"];
+                $stmt = $conn->prepare(
+                    "UPDATE web_users
+                     SET username = ?,
+                         device_id = ?,
+                         valid_from = ?,
+                         valid_until = ?
+                     WHERE id = ? AND role = 'patient'"
+                );
 
                 $stmt->bind_param(
-                    "sssi",
+                    "ssssi",
+                    $username,
                     $device_id,
                     $valid_from,
                     $valid_until,
@@ -604,1100 +539,923 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 );
             }
 
-            $success = $stmt->execute();
-            $stmt->close();
-
-        } else {
-
-            // New patient login requires a password.
-            if ($password === "" || strlen($password) < 8) {
-                owner_redirect_message(
-                    "Please enter a password containing at least 8 characters.",
-                    "error"
-                );
+            if (!$stmt->execute()) {
+                $error = $stmt->error;
+                $stmt->close();
+                owner_message("Could not update login: " . $error);
             }
 
-            $password_hash = password_hash($password, PASSWORD_DEFAULT);
-
-            $stmt = $conn->prepare("
-                INSERT INTO web_users
-                (
-                    username,
-                    password_hash,
-                    role,
-                    enabled,
-                    device_id,
-                    valid_from,
-                    valid_until
-                )
-                VALUES (?, ?, 'patient', 1, ?, ?, ?)
-            ");
-
-            if (!$stmt) {
-                owner_redirect_message("Unable to prepare patient login creation.", "error");
-            }
-
-            $stmt->bind_param(
-                "sssss",
-                $username,
-                $password_hash,
-                $device_id,
-                $valid_from,
-                $valid_until
-            );
-
-            $success = $stmt->execute();
             $stmt->close();
+
+            owner_message("Patient login account updated successfully.");
         }
 
-        if ($success) {
-            owner_redirect_message("Patient login saved successfully.");
+        /*------------------------------------------------------
+          CREATE A NEW PATIENT LOGIN
+        ------------------------------------------------------*/
+
+        if ($password === "" || strlen($password) < 8) {
+            owner_message("New patient password must contain at least 8 characters.");
         }
 
-        error_log("Patient login save error: " . $conn->error);
+        $password_hash = password_hash($password, PASSWORD_DEFAULT);
 
-        owner_redirect_message(
-            "Unable to save patient login. Check whether the username already exists.",
-            "error"
+        $role = "patient";
+        $enabled = 1;
+
+        $stmt = $conn->prepare(
+            "INSERT INTO web_users
+            (username, password_hash, role, enabled,
+             device_id, valid_from, valid_until)
+            VALUES (?, ?, ?, ?, ?, ?, ?)"
         );
+
+        $stmt->bind_param(
+            "sssisss",
+            $username,
+            $password_hash,
+            $role,
+            $enabled,
+            $device_id,
+            $valid_from,
+            $valid_until
+        );
+
+        if (!$stmt->execute()) {
+            $error = $stmt->error;
+            $stmt->close();
+            owner_message("Could not create patient login: " . $error);
+        }
+
+        $stmt->close();
+
+        owner_message("New patient login account created successfully.");
     }
 
-    // ==============================================
-    // ACTION 6: ENABLE OR DISABLE PATIENT LOGIN
-    // ==============================================
+    /*==========================================================
+      ACTION 6: ENABLE OR DISABLE PATIENT LOGIN
+    ==========================================================*/
 
-    elseif ($action === "toggle_patient_login") {
+    if ($action === "toggle_patient_login") {
 
         $login_id = (int)($_POST["login_id"] ?? 0);
         $new_status = (int)($_POST["new_status"] ?? 0);
 
-        if ($login_id <= 0 || !in_array($new_status, [0, 1], true)) {
-            owner_redirect_message("Invalid patient login request.", "error");
+        if (
+            $login_id <= 0 ||
+            !in_array($new_status, [0, 1], true)
+        ) {
+            owner_message("Invalid patient login status request.");
         }
 
-        $stmt = $conn->prepare("
-            UPDATE web_users
-            SET enabled = ?
-            WHERE id = ?
-              AND role = 'patient'
-        ");
-
-        if (!$stmt) {
-            owner_redirect_message("Unable to prepare login status update.", "error");
-        }
+        $stmt = $conn->prepare(
+            "UPDATE web_users
+             SET enabled = ?
+             WHERE id = ? AND role = 'patient'"
+        );
 
         $stmt->bind_param("ii", $new_status, $login_id);
-        $success = $stmt->execute();
+        $stmt->execute();
         $stmt->close();
 
-        if ($success) {
-            owner_redirect_message(
-                $new_status === 1
-                    ? "Patient login enabled."
-                    : "Patient login disabled."
-            );
-        }
-
-        owner_redirect_message("Unable to change patient login status.", "error");
+        owner_message("Patient login status updated.");
     }
 
-    // ==============================================
-    // ACTION 7: DELETE PATIENT LOGIN
-    // ==============================================
+    /*==========================================================
+      ACTION 7: DELETE PATIENT LOGIN
+    ==========================================================*/
 
-    elseif ($action === "delete_patient_login") {
+    if ($action === "delete_patient_login") {
 
         $login_id = (int)($_POST["login_id"] ?? 0);
 
         if ($login_id <= 0) {
-            owner_redirect_message("Invalid patient login ID.", "error");
+            owner_message("Invalid patient login account.");
         }
 
-        $stmt = $conn->prepare("
-            DELETE FROM web_users
-            WHERE id = ?
-              AND role = 'patient'
-        ");
-
-        if (!$stmt) {
-            owner_redirect_message("Unable to prepare patient login deletion.", "error");
-        }
+        $stmt = $conn->prepare(
+            "DELETE FROM web_users
+             WHERE id = ? AND role = 'patient'"
+        );
 
         $stmt->bind_param("i", $login_id);
-        $success = $stmt->execute();
+        $stmt->execute();
         $stmt->close();
 
-        if ($success) {
-            owner_redirect_message(
-                "Patient login deleted. Patient records and readings have not been deleted."
-            );
-        }
-
-        owner_redirect_message("Unable to delete patient login.", "error");
+        owner_message(
+            "Patient login account deleted. Patient details and historical readings remain unchanged."
+        );
     }
 
-    else {
-        owner_redirect_message("Unknown request.", "error");
+    owner_message("Unknown request.");
+}
+
+/*--------------------------------------------------------------
+  6. READ ONE LOGIN ACCOUNT FOR EDITING
+--------------------------------------------------------------*/
+
+$edit_login = null;
+$edit_login_id = (int)($_GET["edit_login"] ?? 0);
+
+if ($edit_login_id > 0) {
+
+    $stmt = $conn->prepare(
+        "SELECT id, username, device_id, valid_from, valid_until
+         FROM web_users
+         WHERE id = ? AND role = 'patient'
+         LIMIT 1"
+    );
+
+    $stmt->bind_param("i", $edit_login_id);
+    $stmt->execute();
+
+    $result = $stmt->get_result();
+    $edit_login = $result->fetch_assoc();
+
+    $stmt->close();
+
+    if (!$edit_login) {
+        $_SESSION["owner_message"] = "Patient login account was not found.";
+        header("Location: owner.php");
+        exit;
     }
 }
 
-// --------------------------------------------------
-// 6. READ ONE-TIME MESSAGE
-// --------------------------------------------------
+/*--------------------------------------------------------------
+  7. LOAD DISPLAY MESSAGE
+--------------------------------------------------------------*/
 
 $message = $_SESSION["owner_message"] ?? "";
-$message_type = $_SESSION["owner_message_type"] ?? "success";
-
 unset($_SESSION["owner_message"]);
-unset($_SESSION["owner_message_type"]);
 
-// --------------------------------------------------
-// 7. GET PATIENT LIST
-// --------------------------------------------------
+/*--------------------------------------------------------------
+  8. LOAD PATIENT LIST
+--------------------------------------------------------------*/
 
 $patients = [];
 
-$result = $conn->query("
-    SELECT
-        patient_id,
-        full_name,
-        age,
-        gender,
-        blood_group,
-        contact,
-        email
-    FROM patients
-    ORDER BY patient_id
-");
+$result = $conn->query(
+    "SELECT patient_id, full_name, age, gender, blood_group,
+            contact, email, notes
+     FROM patients
+     ORDER BY patient_id"
+);
 
 if ($result) {
     while ($row = $result->fetch_assoc()) {
         $patients[] = $row;
     }
-    $result->free();
 }
 
-// --------------------------------------------------
-// 8. GET DEVICE LIST
-// --------------------------------------------------
+/*--------------------------------------------------------------
+  9. LOAD DEVICE ASSIGNMENTS
+--------------------------------------------------------------*/
 
 $devices = [];
 
-$result = $conn->query("
-    SELECT
-        d.device_id,
-        d.patient_id,
-        d.description,
-        d.enabled,
-        d.start_date_time,
-        d.end_date_time,
-        p.full_name
-    FROM patient_devices d
-    LEFT JOIN patients p
-        ON p.patient_id = d.patient_id
-    ORDER BY d.device_id
-");
+$result = $conn->query(
+    "SELECT d.device_id, d.patient_id, d.description,
+            d.enabled, d.start_date_time, d.end_date_time,
+            p.full_name
+     FROM patient_devices d
+     LEFT JOIN patients p ON p.patient_id = d.patient_id
+     ORDER BY d.device_id"
+);
 
 if ($result) {
     while ($row = $result->fetch_assoc()) {
         $devices[] = $row;
     }
-    $result->free();
 }
 
-// --------------------------------------------------
-// 9. GET PATIENT LOGIN LIST
-// --------------------------------------------------
+/*--------------------------------------------------------------
+  10. LOAD PATIENT LOGIN ACCOUNTS
+--------------------------------------------------------------*/
 
-$logins = [];
+$patient_logins = [];
 
-$result = $conn->query("
-    SELECT
-        w.id,
-        w.username,
-        w.enabled,
-        w.device_id,
-        w.valid_from,
-        w.valid_until,
-        d.patient_id,
-        p.full_name
-    FROM web_users w
-    LEFT JOIN patient_devices d
-        ON d.device_id = w.device_id
-    LEFT JOIN patients p
-        ON p.patient_id = d.patient_id
-    WHERE w.role = 'patient'
-    ORDER BY w.username
-");
+$result = $conn->query(
+    "SELECT w.id, w.username, w.enabled,
+            w.device_id, w.valid_from, w.valid_until,
+            d.patient_id, p.full_name
+     FROM web_users w
+     LEFT JOIN patient_devices d ON d.device_id = w.device_id
+     LEFT JOIN patients p ON p.patient_id = d.patient_id
+     WHERE w.role = 'patient'
+     ORDER BY w.username"
+);
 
 if ($result) {
     while ($row = $result->fetch_assoc()) {
-        $logins[] = $row;
+        $patient_logins[] = $row;
     }
-    $result->free();
 }
-
-$owner_name = $_SESSION["owner_name"]
-    ?? $_SESSION["owner_username"]
-    ?? "Administrator";
 
 ?>
-
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-
 <meta charset="UTF-8">
-
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-<title>Owner Dashboard - Patient Monitoring</title>
+<title>Owner / Administrator Dashboard</title>
 
 <style>
-
-* {
-    box-sizing: border-box;
-}
-
-body {
-    margin: 0;
-    padding: 0;
-    font-family: Arial, sans-serif;
-    background: #f1f5f9;
-    color: #263445;
-}
-
-header {
-    background: #123b64;
-    color: white;
-    padding: 18px 24px;
-}
-
-.header-content {
-    max-width: 1200px;
-    margin: auto;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 12px;
-}
-
-header h1 {
-    margin: 0;
-    font-size: 22px;
-}
-
-.header-right {
-    display: flex;
-    align-items: center;
-    gap: 15px;
-    flex-wrap: wrap;
-}
-
-.header-right a {
-    color: white;
-    text-decoration: none;
-    background: #dc3545;
-    padding: 9px 14px;
-    border-radius: 5px;
-}
-
-.container {
-    max-width: 1200px;
-    margin: 25px auto;
-    padding: 0 15px;
-}
-
-.section {
-    background: white;
-    padding: 22px;
-    margin-bottom: 25px;
-    border-radius: 9px;
-    box-shadow: 0 2px 9px rgba(0,0,0,0.07);
-}
-
-h2 {
-    margin-top: 0;
-    color: #123b64;
-    font-size: 20px;
-}
-
-h3 {
-    color: #123b64;
-}
-
-.form-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 14px;
-}
-
-.form-group {
-    margin-bottom: 10px;
-}
-
-.form-group.full {
-    grid-column: 1 / -1;
-}
-
-label {
-    display: block;
-    margin-bottom: 6px;
-    font-weight: bold;
-    font-size: 14px;
-}
-
-input,
-select,
-textarea {
-    width: 100%;
-    padding: 10px;
-    border: 1px solid #cbd5e1;
-    border-radius: 5px;
-    font-size: 14px;
-}
-
-textarea {
-    min-height: 75px;
-    resize: vertical;
-}
-
-button,
-.button {
-    display: inline-block;
-    border: none;
-    padding: 9px 13px;
-    border-radius: 5px;
-    cursor: pointer;
-    color: white;
-    font-size: 13px;
-    text-decoration: none;
-    margin: 2px;
-}
-
-.primary {
-    background: #1769aa;
-}
-
-.success {
-    background: #198754;
-}
-
-.warning {
-    background: #d97706;
-}
-
-.danger {
-    background: #dc3545;
-}
-
-.secondary {
-    background: #64748b;
-}
-
-.message {
-    padding: 13px;
-    border-radius: 6px;
-    margin-bottom: 20px;
-}
-
-.message.success-message {
-    background: #dcfce7;
-    color: #166534;
-}
-
-.message.error-message {
-    background: #fee2e2;
-    color: #991b1b;
-}
-
-.table-wrap {
-    width: 100%;
-    overflow-x: auto;
-}
-
-table {
-    width: 100%;
-    border-collapse: collapse;
-    min-width: 750px;
-    font-size: 13px;
-}
-
-th,
-td {
-    padding: 11px 9px;
-    border-bottom: 1px solid #e2e8f0;
-    text-align: left;
-    vertical-align: top;
-}
-
-th {
-    background: #edf3f9;
-    color: #123b64;
-}
-
-.status-enabled {
-    color: #15803d;
-    font-weight: bold;
-}
-
-.status-disabled {
-    color: #dc2626;
-    font-weight: bold;
-}
-
-.status-expired {
-    color: #b45309;
-    font-weight: bold;
-}
-
-.small {
-    color: #64748b;
-    font-size: 12px;
-}
-
-.action-form {
-    display: inline-block;
-    margin: 2px;
-}
-
-hr {
-    border: none;
-    border-top: 1px solid #e2e8f0;
-    margin: 22px 0;
-}
-
-@media (max-width: 650px) {
-
-    .form-grid {
-        grid-template-columns: 1fr;
+    body {
+        font-family: Arial, sans-serif;
+        background: #f3f5f7;
+        margin: 0;
+        padding: 20px;
+        color: #222;
     }
 
-    .form-group.full {
-        grid-column: auto;
+    .container {
+        max-width: 1200px;
+        margin: auto;
     }
 
-    header h1 {
-        font-size: 18px;
+    h1 {
+        color: #17365d;
+    }
+
+    h2 {
+        background: #e7eef7;
+        padding: 12px;
+        border-left: 5px solid #245a91;
+        margin-top: 30px;
     }
 
     .section {
-        padding: 15px;
+        background: white;
+        padding: 18px;
+        margin-bottom: 22px;
+        border-radius: 7px;
+        box-shadow: 0 1px 5px rgba(0,0,0,0.08);
     }
-}
 
+    label {
+        display: block;
+        font-weight: bold;
+        margin-top: 10px;
+    }
+
+    input, select, textarea {
+        width: 100%;
+        max-width: 450px;
+        padding: 9px;
+        margin-top: 5px;
+        box-sizing: border-box;
+        border: 1px solid #bbb;
+        border-radius: 4px;
+    }
+
+    textarea {
+        min-height: 65px;
+    }
+
+    button, .button {
+        display: inline-block;
+        padding: 8px 13px;
+        margin: 5px 3px 5px 0;
+        border: 0;
+        border-radius: 4px;
+        cursor: pointer;
+        text-decoration: none;
+        color: white;
+        background: #245a91;
+        font-size: 14px;
+    }
+
+    button:hover, .button:hover {
+        opacity: 0.85;
+    }
+
+    .green {
+        background: #198754;
+    }
+
+    .red {
+        background: #c0392b;
+    }
+
+    .orange {
+        background: #d97706;
+    }
+
+    .grey {
+        background: #555;
+    }
+
+    .message {
+        background: #e4f5e8;
+        border: 1px solid #8bc99a;
+        padding: 12px;
+        border-radius: 5px;
+        margin: 15px 0;
+    }
+
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 12px;
+        background: white;
+    }
+
+    th, td {
+        border: 1px solid #ddd;
+        padding: 9px;
+        text-align: left;
+        vertical-align: top;
+    }
+
+    th {
+        background: #e7eef7;
+    }
+
+    .status-enabled {
+        color: green;
+        font-weight: bold;
+    }
+
+    .status-disabled {
+        color: red;
+        font-weight: bold;
+    }
+
+    .small-form {
+        display: inline;
+    }
+
+    .top-links {
+        margin-bottom: 20px;
+    }
+
+    .top-links a {
+        margin-right: 10px;
+    }
+
+    .note {
+        color: #555;
+        font-size: 13px;
+    }
+
+    .edit-panel {
+        border: 2px solid #d97706;
+        padding: 15px;
+        border-radius: 6px;
+        background: #fffaf0;
+        margin-bottom: 15px;
+    }
+
+    @media(max-width: 750px) {
+        body {
+            padding: 8px;
+        }
+
+        table {
+            display: block;
+            overflow-x: auto;
+        }
+    }
 </style>
-
 </head>
 
 <body>
-
-<header>
-
-    <div class="header-content">
-
-        <h1>Patient Monitoring - Owner Dashboard</h1>
-
-        <div class="header-right">
-
-            <span>
-                Administrator: <?php echo owner_escape($owner_name); ?>
-            </span>
-
-            <a href="owner_logout.php">Logout</a>
-
-        </div>
-
-    </div>
-
-</header>
-
 <div class="container">
 
-    <?php if ($message !== ""): ?>
+<h1>Owner / Administrator Dashboard</h1>
 
-        <div class="message <?php echo $message_type === "error" ? "error-message" : "success-message"; ?>">
-            <?php echo owner_escape($message); ?>
-        </div>
+<p>
+    Logged in as:
+    <strong><?php echo owner_escape($_SESSION["owner_username"] ?? "Administrator"); ?></strong>
+</p>
+
+<div class="top-links">
+    <a class="button grey" href="owner_logout.php">Logout</a>
+    <a class="button" href="index.php">Patient Dashboard</a>
+</div>
+
+<?php if ($message !== ""): ?>
+    <div class="message">
+        <?php echo owner_escape($message); ?>
+    </div>
+<?php endif; ?>
+
+
+<!--==========================================================
+    SECTION 1: REGISTER PATIENT
+===========================================================-->
+
+<div class="section">
+
+<h2>1. Register New Patient</h2>
+
+<form method="post" action="owner.php">
+
+    <input type="hidden" name="csrf_token"
+           value="<?php echo owner_escape($csrf_token); ?>">
+
+    <input type="hidden" name="action" value="register_patient">
+
+    <label>Patient ID *</label>
+    <input type="text" name="patient_id" required>
+
+    <label>Patient Full Name *</label>
+    <input type="text" name="full_name" required>
+
+    <label>Age</label>
+    <input type="number" name="age" min="0" max="120">
+
+    <label>Gender</label>
+    <input type="text" name="gender">
+
+    <label>Blood Group</label>
+    <input type="text" name="blood_group">
+
+    <label>Contact / Mobile Number</label>
+    <input type="text" name="contact">
+
+    <label>Email Address</label>
+    <input type="email" name="email">
+
+    <label>Notes</label>
+    <textarea name="notes"></textarea>
+
+    <br>
+    <button type="submit">Register Patient</button>
+
+</form>
+</div>
+
+
+<!--==========================================================
+    SECTION 2: PATIENT LIST
+===========================================================-->
+
+<div class="section">
+
+<h2>2. Registered Patients</h2>
+
+<?php if (count($patients) === 0): ?>
+
+    <p>No patients found.</p>
+
+<?php else: ?>
+
+<table>
+<tr>
+    <th>Patient ID</th>
+    <th>Name</th>
+    <th>Age</th>
+    <th>Gender</th>
+    <th>Blood Group</th>
+    <th>Contact</th>
+    <th>Email</th>
+</tr>
+
+<?php foreach ($patients as $patient): ?>
+<tr>
+    <td><?php echo owner_escape($patient["patient_id"]); ?></td>
+    <td><?php echo owner_escape($patient["full_name"]); ?></td>
+    <td><?php echo owner_escape($patient["age"]); ?></td>
+    <td><?php echo owner_escape($patient["gender"]); ?></td>
+    <td><?php echo owner_escape($patient["blood_group"]); ?></td>
+    <td><?php echo owner_escape($patient["contact"]); ?></td>
+    <td><?php echo owner_escape($patient["email"]); ?></td>
+</tr>
+<?php endforeach; ?>
+
+</table>
+
+<?php endif; ?>
+</div>
+
+
+<!--==========================================================
+    SECTION 3: ASSIGN DEVICE
+===========================================================-->
+
+<div class="section">
+
+<h2>3. Assign / Update Device to Patient</h2>
+
+<form method="post" action="owner.php">
+
+    <input type="hidden" name="csrf_token"
+           value="<?php echo owner_escape($csrf_token); ?>">
+
+    <input type="hidden" name="action" value="assign_device">
+
+    <label>Device ID *</label>
+    <input type="text" name="device_id"
+           placeholder="Example: ESP32-01" required>
+
+    <label>Patient *</label>
+    <select name="device_patient_id" required>
+        <option value="">Select Patient</option>
+
+        <?php foreach ($patients as $patient): ?>
+        <option value="<?php echo owner_escape($patient["patient_id"]); ?>">
+            <?php
+            echo owner_escape(
+                $patient["patient_id"] . " - " . $patient["full_name"]
+            );
+            ?>
+        </option>
+        <?php endforeach; ?>
+
+    </select>
+
+    <label>Device Description</label>
+    <input type="text" name="description">
+
+    <label>Assignment Start Date / Time</label>
+    <input type="datetime-local" name="start_date_time">
+
+    <label>Assignment End Date / Time</label>
+    <input type="datetime-local" name="end_date_time">
+
+    <p class="note">
+        Leave dates blank if no date restriction is required.
+        Updating an existing device assignment preserves its current
+        enabled/disabled setting.
+    </p>
+
+    <button type="submit">Save Device Assignment</button>
+
+</form>
+</div>
+
+
+<!--==========================================================
+    SECTION 4: DEVICE LIST AND ENABLE / DISABLE
+===========================================================-->
+
+<div class="section">
+
+<h2>4. Device Assignments - Enable / Disable</h2>
+
+<?php if (count($devices) === 0): ?>
+
+    <p>No device assignments found.</p>
+
+<?php else: ?>
+
+<table>
+<tr>
+    <th>Device ID</th>
+    <th>Patient ID</th>
+    <th>Patient Name</th>
+    <th>Description</th>
+    <th>Enabled</th>
+    <th>Start</th>
+    <th>End</th>
+    <th>Actions</th>
+</tr>
+
+<?php foreach ($devices as $device): ?>
+
+<tr>
+    <td><?php echo owner_escape($device["device_id"]); ?></td>
+    <td><?php echo owner_escape($device["patient_id"]); ?></td>
+    <td><?php echo owner_escape($device["full_name"]); ?></td>
+    <td><?php echo owner_escape($device["description"]); ?></td>
+
+    <td>
+        <?php if ((int)$device["enabled"] === 1): ?>
+            <span class="status-enabled">Enabled</span>
+        <?php else: ?>
+            <span class="status-disabled">Disabled</span>
+        <?php endif; ?>
+    </td>
+
+    <td><?php echo owner_date_display($device["start_date_time"]); ?></td>
+    <td><?php echo owner_date_display($device["end_date_time"]); ?></td>
+
+    <td>
+
+        <form method="post" action="owner.php" class="small-form">
+
+            <input type="hidden" name="csrf_token"
+                   value="<?php echo owner_escape($csrf_token); ?>">
+
+            <input type="hidden" name="action" value="toggle_device">
+
+            <input type="hidden" name="device_id"
+                   value="<?php echo owner_escape($device["device_id"]); ?>">
+
+            <?php if ((int)$device["enabled"] === 1): ?>
+
+                <input type="hidden" name="new_status" value="0">
+                <button type="submit" class="orange">Disable</button>
+
+            <?php else: ?>
+
+                <input type="hidden" name="new_status" value="1">
+                <button type="submit" class="green">Enable</button>
+
+            <?php endif; ?>
+
+        </form>
+
+        <form method="post" action="owner.php" class="small-form"
+              onsubmit="return confirm('Delete this device assignment? Historical readings will remain.');">
+
+            <input type="hidden" name="csrf_token"
+                   value="<?php echo owner_escape($csrf_token); ?>">
+
+            <input type="hidden" name="action" value="delete_device">
+
+            <input type="hidden" name="device_id"
+                   value="<?php echo owner_escape($device["device_id"]); ?>">
+
+            <button type="submit" class="red">Delete</button>
+
+        </form>
+
+    </td>
+</tr>
+
+<?php endforeach; ?>
+
+</table>
+
+<?php endif; ?>
+</div>
+
+
+<!--==========================================================
+    SECTION 5: PATIENT LOGIN ACCOUNT FORM
+===========================================================-->
+
+<div class="section">
+
+<h2>5. Create / Edit Patient Login Account</h2>
+
+<?php if ($edit_login !== null): ?>
+
+    <div class="edit-panel">
+        <strong>Editing Patient Login Account</strong>
+        <p>
+            Login ID:
+            <?php echo (int)$edit_login["id"]; ?>
+            &nbsp; | &nbsp;
+            Username:
+            <?php echo owner_escape($edit_login["username"]); ?>
+        </p>
+        <a class="button grey" href="owner.php">Cancel Editing</a>
+    </div>
+
+<?php endif; ?>
+
+<form method="post" action="owner.php">
+
+    <input type="hidden" name="csrf_token"
+           value="<?php echo owner_escape($csrf_token); ?>">
+
+    <input type="hidden" name="action" value="save_patient_login">
+
+    <input type="hidden" name="login_id"
+           value="<?php echo $edit_login ? (int)$edit_login["id"] : 0; ?>">
+
+    <label>Patient Login Username *</label>
+    <input type="text" name="username"
+           value="<?php echo owner_escape($edit_login["username"] ?? ""); ?>"
+           required>
+
+    <label>Assigned Device *</label>
+    <select name="login_device_id" required>
+
+        <option value="">Select Enabled Device</option>
+
+        <?php foreach ($devices as $device): ?>
+
+            <?php
+            $device_is_enabled = (int)$device["enabled"] === 1;
+            $selected_device = $edit_login["device_id"] ?? "";
+            ?>
+
+            <?php if ($device_is_enabled || $selected_device === $device["device_id"]): ?>
+
+                <option
+                    value="<?php echo owner_escape($device["device_id"]); ?>"
+                    <?php
+                    echo ($selected_device === $device["device_id"])
+                        ? "selected"
+                        : "";
+                    ?>
+                >
+                    <?php
+                    echo owner_escape(
+                        $device["device_id"] .
+                        " - " .
+                        $device["patient_id"] .
+                        " - " .
+                        $device["full_name"]
+                    );
+                    ?>
+                </option>
+
+            <?php endif; ?>
+
+        <?php endforeach; ?>
+
+    </select>
+
+    <label>
+        <?php echo $edit_login ? "New Password (optional)" : "Password *"; ?>
+    </label>
+
+    <input type="password" name="password"
+           <?php echo $edit_login ? "" : "required"; ?>
+           minlength="8"
+           autocomplete="new-password">
+
+    <?php if ($edit_login): ?>
+        <p class="note">
+            Leave the password blank to keep the existing password.
+            Enter a new password only if you want to change it.
+        </p>
+    <?php else: ?>
+        <p class="note">
+            Password must contain at least 8 characters.
+        </p>
+    <?php endif; ?>
+
+    <label>Login Valid From</label>
+    <input type="datetime-local" name="valid_from"
+           value="<?php echo owner_escape(
+               owner_date_input($edit_login["valid_from"] ?? "")
+           ); ?>">
+
+    <label>Login Valid Until / Expiry</label>
+    <input type="datetime-local" name="valid_until"
+           value="<?php echo owner_escape(
+               owner_date_input($edit_login["valid_until"] ?? "")
+           ); ?>">
+
+    <p class="note">
+        Leave validity dates blank if no login date restriction is required.
+        The assigned device must also be enabled and within its assignment dates.
+    </p>
+
+    <?php if ($edit_login): ?>
+
+        <button type="submit" class="orange">Save Patient Login Changes</button>
+        <a href="owner.php" class="button grey">Cancel</a>
+
+    <?php else: ?>
+
+        <button type="submit">Create Patient Login</button>
 
     <?php endif; ?>
 
+</form>
+</div>
 
-    <!-- ==========================================
-         SECTION 1: REGISTER NEW PATIENT
-    =========================================== -->
 
-    <div class="section">
+<!--==========================================================
+    SECTION 6: PATIENT LOGIN ACCOUNTS - ENABLE / DISABLE
+===========================================================-->
 
-        <h2>1. Register New Patient</h2>
+<div class="section">
 
-        <form method="POST" action="owner.php">
+<h2>6. Patient Login Accounts - Enable / Disable / Edit / Delete</h2>
+
+<p class="note">
+    Use Edit to change a patient's username, assigned device,
+    validity dates, or password. Enable / Disable controls whether
+    the patient can log in. Delete removes only the login account,
+    not the patient record or historical readings.
+</p>
+
+<?php if (count($patient_logins) === 0): ?>
+
+    <p>No patient login accounts found.</p>
+
+<?php else: ?>
+
+<table>
+
+<tr>
+    <th>Login ID</th>
+    <th>Username</th>
+    <th>Patient ID</th>
+    <th>Patient Name</th>
+    <th>Device ID</th>
+    <th>Login Status</th>
+    <th>Valid From</th>
+    <th>Valid Until</th>
+    <th>Actions</th>
+</tr>
+
+<?php foreach ($patient_logins as $login): ?>
+
+<tr>
+
+    <td><?php echo (int)$login["id"]; ?></td>
+
+    <td><?php echo owner_escape($login["username"]); ?></td>
+
+    <td><?php echo owner_escape($login["patient_id"]); ?></td>
+
+    <td><?php echo owner_escape($login["full_name"]); ?></td>
+
+    <td><?php echo owner_escape($login["device_id"]); ?></td>
+
+    <td>
+        <?php if ((int)$login["enabled"] === 1): ?>
+            <span class="status-enabled">Enabled</span>
+        <?php else: ?>
+            <span class="status-disabled">Disabled</span>
+        <?php endif; ?>
+    </td>
+
+    <td><?php echo owner_date_display($login["valid_from"]); ?></td>
+
+    <td><?php echo owner_date_display($login["valid_until"]); ?></td>
+
+    <td>
+
+        <!-- EDIT BUTTON -->
+
+        <a
+            class="button orange"
+            href="owner.php?edit_login=<?php echo (int)$login["id"]; ?>"
+        >
+            Edit
+        </a>
+
+        <!-- ENABLE / DISABLE BUTTON -->
+
+        <form method="post" action="owner.php" class="small-form">
 
             <input type="hidden" name="csrf_token"
-                   value="<?php echo owner_escape($_SESSION["owner_csrf"]); ?>">
+                   value="<?php echo owner_escape($csrf_token); ?>">
 
-            <input type="hidden" name="action" value="register_patient">
+            <input type="hidden" name="action"
+                   value="toggle_patient_login">
 
-            <div class="form-grid">
+            <input type="hidden" name="login_id"
+                   value="<?php echo (int)$login["id"]; ?>">
 
-                <div class="form-group">
-                    <label>Patient ID *</label>
-                    <input type="text" name="patient_id" maxlength="30" required>
-                </div>
+            <?php if ((int)$login["enabled"] === 1): ?>
 
-                <div class="form-group">
-                    <label>Patient Full Name *</label>
-                    <input type="text" name="full_name" maxlength="100" required>
-                </div>
+                <input type="hidden" name="new_status" value="0">
+                <button type="submit" class="orange">Disable</button>
 
-                <div class="form-group">
-                    <label>Age</label>
-                    <input type="number" name="age" min="0" max="120">
-                </div>
+            <?php else: ?>
 
-                <div class="form-group">
-                    <label>Gender</label>
-                    <select name="gender">
-                        <option value="">Select</option>
-                        <option value="Male">Male</option>
-                        <option value="Female">Female</option>
-                        <option value="Other">Other</option>
-                    </select>
-                </div>
+                <input type="hidden" name="new_status" value="1">
+                <button type="submit" class="green">Enable</button>
 
-                <div class="form-group">
-                    <label>Blood Group</label>
-                    <input type="text" name="blood_group" maxlength="5">
-                </div>
-
-                <div class="form-group">
-                    <label>Mobile / Contact</label>
-                    <input type="text" name="contact" maxlength="150">
-                </div>
-
-                <div class="form-group">
-                    <label>Email Address</label>
-                    <input type="email" name="email" maxlength="150">
-                </div>
-
-                <div class="form-group full">
-                    <label>Notes</label>
-                    <textarea name="notes"></textarea>
-                </div>
-
-            </div>
-
-            <button type="submit" class="primary">
-                Register Patient
-            </button>
+            <?php endif; ?>
 
         </form>
 
-    </div>
+        <!-- DELETE BUTTON -->
 
-
-    <!-- ==========================================
-         SECTION 2: ASSIGN OR UPDATE DEVICE
-    =========================================== -->
-
-    <div class="section">
-
-        <h2>2. Assign / Update ESP32 Device</h2>
-
-        <p class="small">
-            Enter an existing Patient ID and the ESP32 device ID.
-            If the device is already assigned, this form updates its assignment and dates.
-            Its current enabled/disabled setting is preserved.
-        </p>
-
-        <form method="POST" action="owner.php">
+        <form method="post" action="owner.php" class="small-form"
+              onsubmit="return confirm('Are you sure you want to delete this patient login account?');">
 
             <input type="hidden" name="csrf_token"
-                   value="<?php echo owner_escape($_SESSION["owner_csrf"]); ?>">
+                   value="<?php echo owner_escape($csrf_token); ?>">
 
-            <input type="hidden" name="action" value="assign_device">
+            <input type="hidden" name="action"
+                   value="delete_patient_login">
 
-            <div class="form-grid">
+            <input type="hidden" name="login_id"
+                   value="<?php echo (int)$login["id"]; ?>">
 
-                <div class="form-group">
-                    <label>Patient ID *</label>
-                    <input type="text" name="device_patient_id" maxlength="30" required>
-                </div>
-
-                <div class="form-group">
-                    <label>ESP32 Device ID *</label>
-                    <input type="text" name="device_id" maxlength="32" required>
-                </div>
-
-                <div class="form-group full">
-                    <label>Device Description</label>
-                    <input type="text" name="description" maxlength="150"
-                           placeholder="Example: ECG Patient Monitoring ESP32">
-                </div>
-
-                <div class="form-group">
-                    <label>Assignment Start Date and Time</label>
-                    <input type="datetime-local" name="start_date_time">
-                </div>
-
-                <div class="form-group">
-                    <label>Assignment End Date and Time</label>
-                    <input type="datetime-local" name="end_date_time">
-                </div>
-
-            </div>
-
-            <button type="submit" class="primary">
-                Save Device Assignment
-            </button>
+            <button type="submit" class="red">Delete</button>
 
         </form>
 
-    </div>
+    </td>
 
+</tr>
 
-    <!-- ==========================================
-         SECTION 3: REGISTERED PATIENTS
-    =========================================== -->
+<?php endforeach; ?>
 
-    <div class="section">
+</table>
 
-        <h2>3. Registered Patients</h2>
-
-        <div class="table-wrap">
-
-            <table>
-
-                <thead>
-                    <tr>
-                        <th>Patient ID</th>
-                        <th>Name</th>
-                        <th>Age</th>
-                        <th>Gender</th>
-                        <th>Blood Group</th>
-                        <th>Mobile / Contact</th>
-                        <th>Email</th>
-                    </tr>
-                </thead>
-
-                <tbody>
-
-                <?php if (count($patients) === 0): ?>
-
-                    <tr>
-                        <td colspan="7">No patients registered.</td>
-                    </tr>
-
-                <?php else: ?>
-
-                    <?php foreach ($patients as $patient): ?>
-
-                        <tr>
-                            <td><?php echo owner_escape($patient["patient_id"]); ?></td>
-                            <td><?php echo owner_escape($patient["full_name"]); ?></td>
-                            <td><?php echo owner_escape($patient["age"]); ?></td>
-                            <td><?php echo owner_escape($patient["gender"]); ?></td>
-                            <td><?php echo owner_escape($patient["blood_group"]); ?></td>
-                            <td><?php echo owner_escape($patient["contact"]); ?></td>
-                            <td><?php echo owner_escape($patient["email"]); ?></td>
-                        </tr>
-
-                    <?php endforeach; ?>
-
-                <?php endif; ?>
-
-                </tbody>
-
-            </table>
-
-        </div>
-
-    </div>
-
-
-    <!-- ==========================================
-         SECTION 4: DEVICE MANAGEMENT
-    =========================================== -->
-
-    <div class="section">
-
-        <h2>4. Assigned Devices - Enable / Disable</h2>
-
-        <div class="table-wrap">
-
-            <table>
-
-                <thead>
-                    <tr>
-                        <th>Device ID</th>
-                        <th>Patient ID</th>
-                        <th>Patient Name</th>
-                        <th>Description</th>
-                        <th>Start Date</th>
-                        <th>End Date</th>
-                        <th>Device Status</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-
-                <tbody>
-
-                <?php if (count($devices) === 0): ?>
-
-                    <tr>
-                        <td colspan="8">No devices assigned.</td>
-                    </tr>
-
-                <?php else: ?>
-
-                    <?php foreach ($devices as $device): ?>
-
-                        <?php
-                        $device_expired = (
-                            !empty($device["end_date_time"]) &&
-                            strtotime($device["end_date_time"]) < time()
-                        );
-
-                        $device_not_started = (
-                            !empty($device["start_date_time"]) &&
-                            strtotime($device["start_date_time"]) > time()
-                        );
-                        ?>
-
-                        <tr>
-
-                            <td><?php echo owner_escape($device["device_id"]); ?></td>
-
-                            <td><?php echo owner_escape($device["patient_id"]); ?></td>
-
-                            <td><?php echo owner_escape($device["full_name"]); ?></td>
-
-                            <td><?php echo owner_escape($device["description"]); ?></td>
-
-                            <td><?php echo owner_escape(owner_date_display($device["start_date_time"])); ?></td>
-
-                            <td><?php echo owner_escape(owner_date_display($device["end_date_time"])); ?></td>
-
-                            <td>
-
-                                <?php if ((int)$device["enabled"] !== 1): ?>
-
-                                    <span class="status-disabled">Disabled</span>
-
-                                <?php elseif ($device_expired): ?>
-
-                                    <span class="status-expired">Expired</span>
-
-                                <?php elseif ($device_not_started): ?>
-
-                                    <span class="status-expired">Not Started</span>
-
-                                <?php else: ?>
-
-                                    <span class="status-enabled">Enabled</span>
-
-                                <?php endif; ?>
-
-                            </td>
-
-                            <td>
-
-                                <form method="POST" class="action-form">
-
-                                    <input type="hidden" name="csrf_token"
-                                           value="<?php echo owner_escape($_SESSION["owner_csrf"]); ?>">
-
-                                    <input type="hidden" name="action" value="toggle_device">
-
-                                    <input type="hidden" name="device_id"
-                                           value="<?php echo owner_escape($device["device_id"]); ?>">
-
-                                    <?php if ((int)$device["enabled"] === 1): ?>
-
-                                        <input type="hidden" name="new_status" value="0">
-
-                                        <button type="submit" class="warning">
-                                            Disable
-                                        </button>
-
-                                    <?php else: ?>
-
-                                        <input type="hidden" name="new_status" value="1">
-
-                                        <button type="submit" class="success">
-                                            Enable
-                                        </button>
-
-                                    <?php endif; ?>
-
-                                </form>
-
-                                <form method="POST" class="action-form"
-                                      onsubmit="return confirm('Delete this device assignment? Historical readings will remain.');">
-
-                                    <input type="hidden" name="csrf_token"
-                                           value="<?php echo owner_escape($_SESSION["owner_csrf"]); ?>">
-
-                                    <input type="hidden" name="action" value="delete_device">
-
-                                    <input type="hidden" name="device_id"
-                                           value="<?php echo owner_escape($device["device_id"]); ?>">
-
-                                    <button type="submit" class="danger">
-                                        Delete
-                                    </button>
-
-                                </form>
-
-                            </td>
-
-                        </tr>
-
-                    <?php endforeach; ?>
-
-                <?php endif; ?>
-
-                </tbody>
-
-            </table>
-
-        </div>
-
-    </div>
-
-
-    <!-- ==========================================
-         SECTION 5: PATIENT LOGIN MANAGEMENT
-    =========================================== -->
-
-    <div class="section">
-
-        <h2>5. Create / Update Patient Login</h2>
-
-        <p class="small">
-            The patient must have an assigned and currently enabled device.
-            Leave the password blank when updating a login if you do not want to change it.
-            A new login requires a password of at least 8 characters.
-        </p>
-
-        <form method="POST" action="owner.php">
-
-            <input type="hidden" name="csrf_token"
-                   value="<?php echo owner_escape($_SESSION["owner_csrf"]); ?>">
-
-            <input type="hidden" name="action" value="save_patient_login">
-
-            <div class="form-grid">
-
-                <div class="form-group">
-                    <label>Patient Username *</label>
-                    <input type="text" name="login_username" maxlength="50" required>
-                </div>
-
-                <div class="form-group">
-                    <label>Password</label>
-                    <input type="password" name="login_password"
-                           minlength="8" autocomplete="new-password">
-                </div>
-
-                <div class="form-group full">
-                    <label>Assigned ESP32 Device ID *</label>
-                    <input type="text" name="login_device_id" maxlength="32" required>
-                </div>
-
-                <div class="form-group">
-                    <label>Login Valid From</label>
-                    <input type="datetime-local" name="valid_from">
-                </div>
-
-                <div class="form-group">
-                    <label>Login Valid Until</label>
-                    <input type="datetime-local" name="valid_until">
-                </div>
-
-            </div>
-
-            <button type="submit" class="primary">
-                Save Patient Login
-            </button>
-
-        </form>
-
-    </div>
-
-
-    <!-- ==========================================
-         SECTION 6: PATIENT LOGIN LIST
-    =========================================== -->
-
-    <div class="section">
-
-        <h2>6. Patient Login Accounts - Enable / Disable</h2>
-
-        <div class="table-wrap">
-
-            <table>
-
-                <thead>
-                    <tr>
-                        <th>Username</th>
-                        <th>Patient ID</th>
-                        <th>Patient Name</th>
-                        <th>Device ID</th>
-                        <th>Valid From</th>
-                        <th>Valid Until</th>
-                        <th>Login Status</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-
-                <tbody>
-
-                <?php if (count($logins) === 0): ?>
-
-                    <tr>
-                        <td colspan="8">No patient login accounts found.</td>
-                    </tr>
-
-                <?php else: ?>
-
-                    <?php foreach ($logins as $login): ?>
-
-                        <?php
-                        $login_expired = (
-                            !empty($login["valid_until"]) &&
-                            strtotime($login["valid_until"]) < time()
-                        );
-
-                        $login_not_started = (
-                            !empty($login["valid_from"]) &&
-                            strtotime($login["valid_from"]) > time()
-                        );
-                        ?>
-
-                        <tr>
-
-                            <td><?php echo owner_escape($login["username"]); ?></td>
-
-                            <td><?php echo owner_escape($login["patient_id"]); ?></td>
-
-                            <td><?php echo owner_escape($login["full_name"]); ?></td>
-
-                            <td><?php echo owner_escape($login["device_id"]); ?></td>
-
-                            <td><?php echo owner_escape(owner_date_display($login["valid_from"])); ?></td>
-
-                            <td><?php echo owner_escape(owner_date_display($login["valid_until"])); ?></td>
-
-                            <td>
-
-                                <?php if ((int)$login["enabled"] !== 1): ?>
-
-                                    <span class="status-disabled">Disabled</span>
-
-                                <?php elseif ($login_expired): ?>
-
-                                    <span class="status-expired">Expired</span>
-
-                                <?php elseif ($login_not_started): ?>
-
-                                    <span class="status-expired">Not Started</span>
-
-                                <?php else: ?>
-
-                                    <span class="status-enabled">Enabled</span>
-
-                                <?php endif; ?>
-
-                            </td>
-
-                            <td>
-
-                                <form method="POST" class="action-form">
-
-                                    <input type="hidden" name="csrf_token"
-                                           value="<?php echo owner_escape($_SESSION["owner_csrf"]); ?>">
-
-                                    <input type="hidden" name="action"
-                                           value="toggle_patient_login">
-
-                                    <input type="hidden" name="login_id"
-                                           value="<?php echo (int)$login["id"]; ?>">
-
-                                    <?php if ((int)$login["enabled"] === 1): ?>
-
-                                        <input type="hidden" name="new_status" value="0">
-
-                                        <button type="submit" class="warning">
-                                            Disable
-                                        </button>
-
-                                    <?php else: ?>
-
-                                        <input type="hidden" name="new_status" value="1">
-
-                                        <button type="submit" class="success">
-                                            Enable
-                                        </button>
-
-                                    <?php endif; ?>
-
-                                </form>
-
-                                <form method="POST" class="action-form"
-                                      onsubmit="return confirm('Delete this patient login? Patient records will remain.');">
-
-                                    <input type="hidden" name="csrf_token"
-                                           value="<?php echo owner_escape($_SESSION["owner_csrf"]); ?>">
-
-                                    <input type="hidden" name="action"
-                                           value="delete_patient_login">
-
-                                    <input type="hidden" name="login_id"
-                                           value="<?php echo (int)$login["id"]; ?>">
-
-                                    <button type="submit" class="danger">
-                                        Delete Login
-                                    </button>
-
-                                </form>
-
-                            </td>
-
-                        </tr>
-
-                    <?php endforeach; ?>
-
-                <?php endif; ?>
-
-                </tbody>
-
-            </table>
-
-        </div>
-
-    </div>
-
-
-    <div class="section">
-
-        <h2>Important Information</h2>
-
-        <ul>
-            <li>Disabling a device prevents patient access through that device.</li>
-            <li>Disabling a patient login prevents that username from logging in.</li>
-            <li>Enabling an account does not override expired validity dates.</li>
-            <li>Device assignment dates and login validity dates are checked separately.</li>
-            <li>Deleting a device assignment does not delete historical readings.</li>
-            <li>Deleting a patient login does not delete the patient record.</li>
-            <li>Patient access is checked again by the protected patient pages.</li>
-        </ul>
-
-    </div>
+<?php endif; ?>
 
 </div>
 
+
+<!--==========================================================
+    END OF OWNER DASHBOARD
+===========================================================-->
+
+<div class="section">
+    <p>
+        <strong>Owner / Administrator Dashboard</strong>
+    </p>
+
+    <a class="button grey" href="owner_logout.php">Logout</a>
+</div>
+
+</div>
 </body>
 </html>
