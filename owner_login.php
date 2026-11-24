@@ -1,51 +1,64 @@
 <?php
 /*
-=========================================================
- PROJECT : ravi2_patient
- FILE    : owner_login.php
+    PROJECT: ravi2_patient
+    FILE: owner_login.php
 
- PURPOSE :
- 1. Separate Administrator / Owner login.
- 2. Verify username and password from owner_users.
- 3. Start a secure owner session.
- 4. Open the owner dashboard after successful login.
+    PURPOSE:
+    Owner / Administrator login.
 
- IMPORTANT :
- - Uses existing owner_users table.
- - Does not create or change owner accounts.
- - Patient login remains separate.
-=========================================================
+    IMPORTANT:
+    1. Uses the existing web_users table.
+    2. Only role = admin can log in.
+    3. Account must be enabled.
+    4. Password is checked using password_verify().
+    5. Uses the existing config.php connection ($conn).
+    6. Does not change any database tables.
+    7. Patient login remains separate in login.php.
 */
+
+// --------------------------------------------------
+// 1. LOAD DATABASE CONNECTION AND SESSION
+// --------------------------------------------------
 
 require_once __DIR__ . "/config.php";
 
-// If owner is already logged in, open owner dashboard.
+if (!isset($conn) || !($conn instanceof mysqli)) {
+    die("Database connection is not available. Please check config.php.");
+}
+
+// --------------------------------------------------
+// 2. ALREADY LOGGED IN?
+// --------------------------------------------------
+
 if (!empty($_SESSION["owner_logged_in"])) {
     header("Location: owner.php");
     exit;
 }
 
-// Create security token.
-if (empty($_SESSION["owner_login_token"])) {
-    $_SESSION["owner_login_token"] = bin2hex(random_bytes(32));
+// --------------------------------------------------
+// 3. CREATE CSRF SECURITY TOKEN
+// --------------------------------------------------
+
+if (empty($_SESSION["admin_login_csrf"])) {
+    $_SESSION["admin_login_csrf"] = bin2hex(random_bytes(32));
 }
 
-$error_message = "";
+$message = "";
 
-// -------------------------------------------------------
-// HANDLE LOGIN FORM
-// -------------------------------------------------------
+// --------------------------------------------------
+// 4. PROCESS LOGIN FORM
+// --------------------------------------------------
 
 if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
-    $submitted_token = $_POST["csrf_token"] ?? "";
+    $csrf = $_POST["csrf_token"] ?? "";
 
     if (
-        !is_string($submitted_token) ||
-        !hash_equals($_SESSION["owner_login_token"], $submitted_token)
+        empty($_SESSION["admin_login_csrf"]) ||
+        !hash_equals($_SESSION["admin_login_csrf"], $csrf)
     ) {
 
-        $error_message = "Invalid request. Please refresh the page.";
+        $message = "Security verification failed. Please reload the page.";
 
     } else {
 
@@ -54,18 +67,22 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
         if ($username === "" || $password === "") {
 
-            $error_message = "Please enter username and password.";
+            $message = "Please enter username and password.";
 
         } else {
 
-            // Find the owner account.
+            // ------------------------------------------
+            // 5. FIND ADMINISTRATOR IN web_users
+            // ------------------------------------------
+
             $sql = "
                 SELECT
                     id,
                     username,
                     password_hash,
-                    full_name
-                FROM owner_users
+                    role,
+                    enabled
+                FROM web_users
                 WHERE username = ?
                 LIMIT 1
             ";
@@ -74,8 +91,8 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
             if (!$stmt) {
 
-                error_log("Owner login SQL error: " . $conn->error);
-                $error_message = "Unable to process login. Please try again.";
+                error_log("Owner login prepare error: " . $conn->error);
+                $message = "Database error. Please try again.";
 
             } else {
 
@@ -83,47 +100,57 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                 $stmt->execute();
 
                 $stmt->bind_result(
-                    $owner_id,
-                    $owner_username,
-                    $password_hash,
-                    $owner_full_name
+                    $db_id,
+                    $db_username,
+                    $db_password_hash,
+                    $db_role,
+                    $db_enabled
                 );
 
                 $account_found = $stmt->fetch();
 
                 $stmt->close();
 
-                // Verify the password.
+                // --------------------------------------
+                // 6. CHECK ADMINISTRATOR CREDENTIALS
+                // --------------------------------------
+
                 if (
                     $account_found &&
-                    password_verify($password, $password_hash)
+                    $db_role === "admin" &&
+                    (int)$db_enabled === 1 &&
+                    password_verify($password, $db_password_hash)
                 ) {
 
-                    // Prevent session fixation.
+                    // ----------------------------------
+                    // 7. LOGIN SUCCESSFUL
+                    // ----------------------------------
+
                     session_regenerate_id(true);
 
-                    // Save owner login information.
+                    // These session names are required
+                    // by the owner.php dashboard.
+
                     $_SESSION["owner_logged_in"] = true;
-                    $_SESSION["owner_id"] = $owner_id;
-                    $_SESSION["owner_username"] = $owner_username;
-                    $_SESSION["owner_full_name"] = $owner_full_name;
+                    $_SESSION["owner_id"] = (int)$db_id;
+                    $_SESSION["owner_username"] = $db_username;
+                    $_SESSION["owner_name"] = $db_username;
 
-                    // Remove old login token.
-                    unset($_SESSION["owner_login_token"]);
+                    // Remove the old login security token.
+                    unset($_SESSION["admin_login_csrf"]);
 
-                    // Open Administrator dashboard.
                     header("Location: owner.php");
                     exit;
 
                 } else {
 
-                    $error_message = "Incorrect owner username or password.";
+                    $message =
+                        "Incorrect username or password, or administrator access is disabled.";
                 }
             }
         }
     }
 }
-
 ?>
 
 <!DOCTYPE html>
@@ -136,83 +163,92 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
     <meta name="viewport"
           content="width=device-width, initial-scale=1.0">
 
-    <title>Administrator Login</title>
+    <title>Owner / Administrator Login</title>
 
     <style>
 
+        * {
+            box-sizing: border-box;
+        }
+
         body {
-            font-family: Arial, sans-serif;
-            background: #f1f4f8;
             margin: 0;
+            font-family: Arial, sans-serif;
+            background: #eef2f7;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
             padding: 20px;
         }
 
         .login-box {
-            max-width: 420px;
-            margin: 70px auto;
+            width: 100%;
+            max-width: 430px;
             background: white;
             padding: 30px;
-            border-radius: 10px;
-            box-shadow: 0 3px 12px rgba(0,0,0,0.12);
+            border-radius: 12px;
+            box-shadow: 0 4px 18px rgba(0,0,0,0.12);
         }
 
-        h2 {
+        h1 {
             text-align: center;
-            color: #24476b;
-            margin-top: 0;
+            color: #123b64;
+            font-size: 25px;
         }
 
         .subtitle {
             text-align: center;
-            color: #666;
+            color: #64748b;
             margin-bottom: 25px;
+            font-size: 14px;
         }
 
         label {
             display: block;
-            margin-top: 15px;
+            margin-bottom: 7px;
             font-weight: bold;
         }
 
         input {
             width: 100%;
-            box-sizing: border-box;
             padding: 12px;
-            margin-top: 7px;
-            border: 1px solid #ccc;
-            border-radius: 5px;
+            margin-bottom: 18px;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
             font-size: 15px;
         }
 
         button {
             width: 100%;
-            padding: 12px;
-            margin-top: 22px;
-            background: #24476b;
-            color: white;
+            padding: 13px;
+            background: #2563eb;
             border: none;
-            border-radius: 5px;
+            border-radius: 6px;
+            color: white;
             font-size: 16px;
+            font-weight: bold;
             cursor: pointer;
         }
 
         button:hover {
-            background: #16324f;
+            background: #1d4ed8;
         }
 
-        .error {
-            background: #fff0f0;
-            color: #b42318;
+        .message {
             padding: 12px;
-            border-radius: 5px;
-            margin-bottom: 15px;
+            margin-bottom: 18px;
+            background: #fee2e2;
+            color: #991b1b;
+            border-radius: 6px;
+            font-size: 14px;
         }
 
         .footer {
             text-align: center;
-            color: #777;
-            font-size: 13px;
-            margin-top: 20px;
+            color: #64748b;
+            margin-top: 22px;
+            font-size: 12px;
         }
 
     </style>
@@ -223,18 +259,18 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
 <div class="login-box">
 
-    <h2>Administrator Login</h2>
+    <h1>Patient Monitoring System</h1>
 
     <div class="subtitle">
-        Patient Monitoring System
+        Owner / Administrator Login
     </div>
 
-    <?php if ($error_message !== ""): ?>
+    <?php if ($message !== ""): ?>
 
-        <div class="error">
+        <div class="message">
             <?php
             echo htmlspecialchars(
-                $error_message,
+                $message,
                 ENT_QUOTES,
                 "UTF-8"
             );
@@ -243,48 +279,49 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
     <?php endif; ?>
 
-    <form method="POST" action="owner_login.php">
+    <form method="POST" action="owner_login.php" autocomplete="off">
 
         <input
             type="hidden"
             name="csrf_token"
             value="<?php
-            echo htmlspecialchars(
-                $_SESSION["owner_login_token"],
-                ENT_QUOTES,
-                "UTF-8"
-            );
+                echo htmlspecialchars(
+                    $_SESSION["admin_login_csrf"],
+                    ENT_QUOTES,
+                    "UTF-8"
+                );
             ?>"
         >
 
-        <label for="username">Owner Username</label>
+        <label>Administrator Username</label>
 
         <input
             type="text"
-            id="username"
             name="username"
+            maxlength="50"
             required
             autocomplete="username"
         >
 
-        <label for="password">Owner Password</label>
+        <label>Password</label>
 
         <input
             type="password"
-            id="password"
             name="password"
             required
             autocomplete="current-password"
         >
 
         <button type="submit">
-            Owner Login
+            Administrator Login
         </button>
 
     </form>
 
     <div class="footer">
-        Administrator / Owner Access Only
+        Ravi2 Patient Monitoring System
+        <br><br>
+        Authorized Administrator Access Only
     </div>
 
 </div>
