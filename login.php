@@ -1,392 +1,363 @@
 <?php
 /*
-=========================================================
- PROJECT : ravi2_patient.onrender.com
- FILE    : login.php
+    PROJECT: ravi2_patient
+    FILE: login.php
 
- PURPOSE :
- 1. Patient enters username and password.
- 2. Verify existing patient account.
- 3. Check patient and device enabled status.
- 4. Check account and device validity dates.
- 5. Start patient session.
- 6. Open patient dashboard.
+    PURPOSE:
+    Patient login for the new patient monitoring application.
 
- DATABASE TABLES:
- web_users
- patients
- patient_devices
-
- No database records are modified.
-=========================================================
+    IMPORTANT:
+    1. Uses the existing web_users table.
+    2. Only accounts with role = patient can log in here.
+    3. Finds patient_id through patient_devices using device_id.
+    4. Checks whether the login account is enabled and valid.
+    5. Checks whether the assigned device is enabled and valid.
+    6. Does not change any database tables.
+    7. Does not modify patient_remote.onrender.com.
 */
 
-require_once "config.php";
+// --------------------------------------------------
+// 1. CONNECT TO THE DATABASE AND START THE SESSION
+// --------------------------------------------------
 
-// -------------------------------------------------------
-// 1. INITIAL SETTINGS
-// -------------------------------------------------------
+require_once __DIR__ . "/config.php";
 
-$error = "";
+/*
+   config.php must create the MySQLi connection in $conn
+   and start the PHP session.
+*/
 
-// Create a security token for the login form.
-if (empty($_SESSION['ravi2_login_token'])) {
-    $_SESSION['ravi2_login_token'] = bin2hex(random_bytes(32));
+if (!isset($conn) || !($conn instanceof mysqli)) {
+    die("Database connection is not available. Please check config.php.");
 }
 
-// -------------------------------------------------------
-// 2. CHECK DATE VALIDITY
-// -------------------------------------------------------
+// --------------------------------------------------
+// 2. IF PATIENT IS ALREADY LOGGED IN, OPEN DASHBOARD
+// --------------------------------------------------
 
-// NULL start date means no start-date restriction.
-// NULL end date means no expiry restriction.
-
-function dateIsValid($start, $end)
-{
-    $now = time();
-
-    if ($start !== null && $start !== "") {
-        if (strtotime($start) > $now) {
-            return false;
-        }
-    }
-
-    if ($end !== null && $end !== "") {
-        if (strtotime($end) < $now) {
-            return false;
-        }
-    }
-
-    return true;
+if (!empty($_SESSION["ravi2_patient_logged_in"])) {
+    header("Location: index.php");
+    exit;
 }
 
-// -------------------------------------------------------
-// 3. PROCESS LOGIN FORM
-// -------------------------------------------------------
+// --------------------------------------------------
+// 3. VARIABLES USED BY THE LOGIN PAGE
+// --------------------------------------------------
+
+$error_message = "";
+$username = "";
+
+// --------------------------------------------------
+// 4. PROCESS THE LOGIN FORM
+// --------------------------------------------------
 
 if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
-    // Check security token.
-    if (
-        !isset($_POST['login_token']) ||
-        !hash_equals(
-            $_SESSION['ravi2_login_token'],
-            $_POST['login_token']
-        )
-    ) {
-        $error = "Invalid request. Please try again.";
-    }
+    // Read the username and password entered by the patient.
+    $username = trim($_POST["username"] ?? "");
+    $password = $_POST["password"] ?? "";
 
-    else {
+    if ($username === "" || $password === "") {
 
-        // Read entered username and password.
-        $username = trim($_POST['username'] ?? "");
-        $password = $_POST['password'] ?? "";
+        $error_message = "Please enter both username and password.";
 
-        if ($username === "" || $password === "") {
+    } else {
 
-            $error = "Please enter username and password.";
+        // ------------------------------------------
+        // 5. FIND THE LOGIN ACCOUNT
+        // ------------------------------------------
+
+        $sql = "
+            SELECT
+                username,
+                password_hash,
+                role,
+                enabled,
+                device_id,
+                valid_from,
+                valid_until
+            FROM web_users
+            WHERE username = ?
+            LIMIT 1
+        ";
+
+        $stmt = $conn->prepare($sql);
+
+        if (!$stmt) {
+
+            error_log("Patient login prepare error: " . $conn->error);
+            $error_message = "Unable to process login. Please try again.";
 
         } else {
 
-            // ------------------------------------------------
-            // 4. FIND PATIENT LOGIN ACCOUNT
-            // ------------------------------------------------
+            $stmt->bind_param("s", $username);
+            $stmt->execute();
 
-            $sql = "SELECT
-                        id,
-                        username,
-                        patient_id,
-                        password_hash,
-                        enabled,
-                        device_id,
-                        valid_from,
-                        valid_until
-                    FROM web_users
-                    WHERE username = ?
-                    LIMIT 1";
+            $stmt->bind_result(
+                $db_username,
+                $password_hash,
+                $role,
+                $login_enabled,
+                $device_id,
+                $valid_from,
+                $valid_until
+            );
 
-            $stmt = $db->prepare($sql);
+            $account_found = $stmt->fetch();
 
-            if (!$stmt) {
-                error_log("Patient login query preparation failed.");
-                $error = "Unable to process login. Please try again.";
-            }
+            $stmt->close();
 
-            else {
+            // --------------------------------------
+            // 6. VERIFY USERNAME AND PASSWORD
+            // --------------------------------------
 
-                $stmt->bind_param("s", $username);
-                $stmt->execute();
+            if (!$account_found || !password_verify($password, $password_hash)) {
 
-                $stmt->bind_result(
-                    $user_id,
-                    $db_username,
-                    $patient_id,
-                    $password_hash,
-                    $enabled,
-                    $device_id,
-                    $valid_from,
-                    $valid_until
-                );
+                $error_message = "Incorrect username or password.";
 
-                $account_found = $stmt->fetch();
+            } elseif ($role !== "patient") {
 
-                $stmt->close();
+                // Administrator accounts cannot use patient login.
+                $error_message = "This login is not a patient account.";
 
-                // --------------------------------------------
-                // 5. VERIFY USERNAME AND PASSWORD
-                // --------------------------------------------
+            } elseif ((int)$login_enabled !== 1) {
 
-                if (
-                    !$account_found ||
-                    !password_verify($password, $password_hash)
-                ) {
+                $error_message = "Your account is disabled. Please contact the owner.";
 
-                    $error = "Incorrect username or password.";
+            } else {
 
-                }
+                // ----------------------------------
+                // 7. CHECK LOGIN VALIDITY DATES
+                // ----------------------------------
 
-                // --------------------------------------------
-                // 6. CHECK ACCOUNT ENABLED STATUS
-                // --------------------------------------------
+                $date_sql = "
+                    SELECT
+                        (
+                            (? IS NULL OR ? <= NOW())
+                            AND
+                            (? IS NULL OR ? >= NOW())
+                        ) AS login_valid
+                ";
 
-                elseif ((int)$enabled !== 1) {
+                $date_stmt = $conn->prepare($date_sql);
 
-                    $error = "Your account is disabled. Contact administrator.";
+                if (!$date_stmt) {
 
-                }
+                    error_log("Login date check error: " . $conn->error);
+                    $error_message = "Unable to verify your account. Please try again.";
 
-                // --------------------------------------------
-                // 7. CHECK ACCOUNT VALIDITY DATES
-                // --------------------------------------------
+                } else {
 
-                elseif (!dateIsValid($valid_from, $valid_until)) {
+                    $date_stmt->bind_param(
+                        "ssss",
+                        $valid_from,
+                        $valid_from,
+                        $valid_until,
+                        $valid_until
+                    );
 
-                    $error = "Your account is not currently valid.";
+                    $date_stmt->execute();
+                    $date_stmt->bind_result($login_valid);
+                    $date_stmt->fetch();
+                    $date_stmt->close();
 
-                }
+                    if ((int)$login_valid !== 1) {
 
-                // --------------------------------------------
-                // 8. CHECK PATIENT INFORMATION
-                // --------------------------------------------
+                        $error_message = "Your login validity period has expired.";
 
-                elseif (empty($patient_id) || empty($device_id)) {
+                    } elseif (empty($device_id)) {
 
-                    $error = "No patient or device assignment found.";
-
-                }
-
-                else {
-
-                    $patient_name = "";
-
-                    $sql = "SELECT full_name
-                            FROM patients
-                            WHERE patient_id = ?
-                            LIMIT 1";
-
-                    $stmt = $db->prepare($sql);
-
-                    if (!$stmt) {
-
-                        error_log("Patient information query failed.");
-                        $error = "Unable to verify patient information.";
+                        $error_message = "No monitoring device is assigned to your account.";
 
                     } else {
 
-                        $stmt->bind_param("s", $patient_id);
-                        $stmt->execute();
+                        // ----------------------------------
+                        // 8. FIND PATIENT THROUGH DEVICE ID
+                        // ----------------------------------
 
-                        $stmt->bind_result($patient_name);
+                        /*
+                           In your existing database:
 
-                        $patient_found = $stmt->fetch();
+                           Username: ravimahajan1
+                           Device:   ESP32-01
+                           Patient:  P1001
 
-                        $stmt->close();
+                           The patient_id field in web_users is empty.
+                           Therefore, we obtain patient_id from
+                           patient_devices.
+                        */
 
-                        if (!$patient_found) {
+                        $patient_sql = "
+                            SELECT
+                                p.patient_id,
+                                p.full_name
+                            FROM patient_devices d
+                            INNER JOIN patients p
+                                ON p.patient_id = d.patient_id
+                            WHERE
+                                d.device_id = ?
+                                AND d.enabled = 1
+                                AND (
+                                    d.start_date_time IS NULL
+                                    OR d.start_date_time <= NOW()
+                                )
+                                AND (
+                                    d.end_date_time IS NULL
+                                    OR d.end_date_time >= NOW()
+                                )
+                            LIMIT 1
+                        ";
 
-                            $error = "Patient record not found.";
+                        $patient_stmt = $conn->prepare($patient_sql);
 
-                        }
-                    }
+                        if (!$patient_stmt) {
 
-                    // ----------------------------------------
-                    // 9. CHECK ASSIGNED ESP32 DEVICE
-                    // ----------------------------------------
-
-                    if ($error === "") {
-
-                        $device_enabled = 0;
-                        $device_start = null;
-                        $device_end = null;
-
-                        $sql = "SELECT
-                                    enabled,
-                                    start_date_time,
-                                    end_date_time
-                                FROM patient_devices
-                                WHERE device_id = ?
-                                AND patient_id = ?
-                                LIMIT 1";
-
-                        $stmt = $db->prepare($sql);
-
-                        if (!$stmt) {
-
-                            error_log("Device verification query failed.");
-                            $error = "Unable to verify device.";
+                            error_log("Patient mapping error: " . $conn->error);
+                            $error_message = "Unable to verify your device assignment.";
 
                         } else {
 
-                            $stmt->bind_param(
-                                "ss",
-                                $device_id,
-                                $patient_id
+                            $patient_stmt->bind_param("s", $device_id);
+                            $patient_stmt->execute();
+
+                            $patient_stmt->bind_result(
+                                $patient_id,
+                                $patient_name
                             );
 
-                            $stmt->execute();
+                            $patient_found = $patient_stmt->fetch();
 
-                            $stmt->bind_result(
-                                $device_enabled,
-                                $device_start,
-                                $device_end
-                            );
+                            $patient_stmt->close();
 
-                            $device_found = $stmt->fetch();
+                            // ----------------------------------
+                            // 9. CHECK DEVICE AND PATIENT RECORD
+                            // ----------------------------------
 
-                            $stmt->close();
+                            if (!$patient_found) {
 
-                            if (!$device_found) {
+                                $error_message =
+                                    "Your monitoring device is disabled, expired, or not assigned. Please contact the owner.";
 
-                                $error = "Assigned device not found.";
+                            } else {
 
-                            }
+                                // ----------------------------------
+                                // 10. LOGIN SUCCESSFUL
+                                // ----------------------------------
 
-                            elseif ((int)$device_enabled !== 1) {
+                                /*
+                                   Create a new session ID after login
+                                   to improve session security.
+                                */
 
-                                $error = "Your monitoring device is disabled.";
+                                session_regenerate_id(true);
 
-                            }
+                                // Save the verified patient details.
+                                $_SESSION["ravi2_patient_logged_in"] = true;
 
-                            elseif (
-                                !dateIsValid($device_start, $device_end)
-                            ) {
+                                $_SESSION["ravi2_username"] = $db_username;
 
-                                $error = "Your device assignment is not currently valid.";
+                                $_SESSION["ravi2_patient_id"] = $patient_id;
 
+                                $_SESSION["ravi2_patient_name"] = $patient_name;
+
+                                $_SESSION["ravi2_device_id"] = $device_id;
+
+                                $_SESSION["ravi2_role"] = "patient";
+
+                                // Open the patient dashboard.
+                                header("Location: index.php");
+                                exit;
                             }
                         }
-                    }
-
-                    // ----------------------------------------
-                    // 10. LOGIN SUCCESSFUL
-                    // ----------------------------------------
-
-                    if ($error === "") {
-
-                        // Change session ID after successful login.
-                        session_regenerate_id(true);
-
-                        // Store patient login information.
-                        $_SESSION['ravi2_patient_logged_in'] = true;
-
-                        $_SESSION['ravi2_user_id'] = $user_id;
-
-                        $_SESSION['ravi2_username'] = $db_username;
-
-                        $_SESSION['ravi2_patient_id'] = $patient_id;
-
-                        $_SESSION['ravi2_patient_name'] = $patient_name;
-
-                        $_SESSION['ravi2_device_id'] = $device_id;
-
-                        // Remove login security token.
-                        unset($_SESSION['ravi2_login_token']);
-
-                        // Open patient dashboard.
-                        header("Location: index.php");
-                        exit;
                     }
                 }
             }
         }
     }
+}
+
+// --------------------------------------------------
+// 11. DISPLAY THE LOGIN PAGE
+// --------------------------------------------------
+
+function login_escape($value) {
+    return htmlspecialchars((string)$value, ENT_QUOTES, "UTF-8");
 }
 
 ?>
 
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
 
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-    <meta name="viewport"
-          content="width=device-width, initial-scale=1">
-
-    <title>Patient Login</title>
+    <title>Patient Login - Ravi2 Patient Monitoring</title>
 
     <style>
 
         body {
             font-family: Arial, sans-serif;
-            background: #f2f5f9;
+            background: #f1f4f8;
             margin: 0;
             padding: 0;
         }
 
         .login-box {
-            max-width: 380px;
+            width: 90%;
+            max-width: 400px;
             margin: 80px auto;
+            padding: 25px;
             background: white;
-            padding: 30px;
-            border-radius: 10px;
-            box-shadow: 0 2px 12px rgba(0,0,0,0.10);
+            border-radius: 8px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.12);
         }
 
         h2 {
             text-align: center;
-            color: #23466b;
+            color: #263b55;
         }
 
         label {
             display: block;
-            margin-top: 18px;
+            margin-top: 15px;
             font-weight: bold;
         }
 
         input {
             width: 100%;
-            padding: 12px;
-            margin-top: 7px;
             box-sizing: border-box;
+            padding: 11px;
+            margin-top: 6px;
             border: 1px solid #ccc;
             border-radius: 5px;
+            font-size: 15px;
         }
 
         button {
             width: 100%;
             padding: 12px;
-            margin-top: 25px;
+            margin-top: 22px;
             background: #1769aa;
             color: white;
             border: none;
             border-radius: 5px;
-            cursor: pointer;
             font-size: 16px;
+            cursor: pointer;
         }
 
         button:hover {
-            background: #104d80;
+            background: #10558c;
         }
 
         .error {
-            color: #b00020;
-            background: #ffe9e9;
+            background: #ffe6e6;
+            color: #a00000;
             padding: 10px;
             border-radius: 5px;
             margin-top: 15px;
+            text-align: center;
         }
 
         .footer {
@@ -402,62 +373,55 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
 
 <body>
 
-<div class="login-box">
+    <div class="login-box">
 
-    <h2>Patient Monitoring System</h2>
+        <h2>Patient Login</h2>
 
-    <p style="text-align:center;">
-        Patient Login
-    </p>
+        <p style="text-align:center;">
+            Patient Monitoring System
+        </p>
 
-    <?php if ($error !== ""): ?>
+        <?php if ($error_message !== ""): ?>
 
-        <div class="error">
-            <?php echo htmlspecialchars($error); ?>
+            <div class="error">
+                <?php echo login_escape($error_message); ?>
+            </div>
+
+        <?php endif; ?>
+
+        <form method="POST" action="login.php">
+
+            <label>Username</label>
+
+            <input
+                type="text"
+                name="username"
+                value="<?php echo login_escape($username); ?>"
+                maxlength="50"
+                autocomplete="username"
+                required
+            >
+
+            <label>Password</label>
+
+            <input
+                type="password"
+                name="password"
+                autocomplete="current-password"
+                required
+            >
+
+            <button type="submit">
+                Login
+            </button>
+
+        </form>
+
+        <div class="footer">
+            Ravi2 Patient Monitoring System
         </div>
 
-    <?php endif; ?>
-
-    <form method="POST" action="login.php">
-
-        <input
-            type="hidden"
-            name="login_token"
-            value="<?php echo htmlspecialchars(
-                $_SESSION['ravi2_login_token']
-            ); ?>"
-        >
-
-        <label>Username</label>
-
-        <input
-            type="text"
-            name="username"
-            maxlength="50"
-            required
-            autocomplete="username"
-        >
-
-        <label>Password</label>
-
-        <input
-            type="password"
-            name="password"
-            required
-            autocomplete="current-password"
-        >
-
-        <button type="submit">
-            Login
-        </button>
-
-    </form>
-
-    <div class="footer">
-        Patient Monitoring System
     </div>
-
-</div>
 
 </body>
 </html>
