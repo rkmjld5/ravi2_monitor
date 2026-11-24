@@ -5,18 +5,18 @@
  FILE    : alerts.php
 
  PURPOSE :
- 1. Display alerts for the logged-in patient.
- 2. Read alerts from the existing alerts table.
- 3. Show the latest 100 alerts.
- 4. Show acknowledged / not acknowledged status.
+ 1. Display the logged-in patient's alerts.
+ 2. Display the latest 100 alerts.
+ 3. Allow the patient to acknowledge an alert.
+ 4. Save acknowledgement date and time.
  5. Protect the page using patient_access.php.
 
  IMPORTANT :
  - Web dashboard alerts only.
- - No Firebase.
- - No mobile push notifications.
+ - No Firebase or mobile notifications.
  - No SMS or WhatsApp.
- - No database tables are changed.
+ - No database table changes.
+ - A patient can acknowledge only their own alerts.
 =========================================================
 */
 
@@ -25,14 +25,11 @@
 // 1. CHECK PATIENT LOGIN AND ACCESS
 // -------------------------------------------------------
 
-// This file checks the patient account and device status.
-// It also loads config.php and provides the $conn variable.
-
 require_once __DIR__ . "/patient_access.php";
 
 
 // -------------------------------------------------------
-// 2. GET LOGGED-IN PATIENT INFORMATION
+// 2. GET PATIENT INFORMATION
 // -------------------------------------------------------
 
 $patient_id   = $_SESSION["ravi2_patient_id"];
@@ -41,7 +38,143 @@ $device_id    = $_SESSION["ravi2_device_id"];
 
 
 // -------------------------------------------------------
-// 3. INITIALIZE VARIABLES
+// 3. CREATE SECURITY TOKEN
+// -------------------------------------------------------
+
+/*
+ This token protects the acknowledgement form.
+ It helps prevent unauthorized requests.
+*/
+
+if (empty($_SESSION["alerts_csrf_token"])) {
+
+    $_SESSION["alerts_csrf_token"] = bin2hex(random_bytes(32));
+}
+
+$csrf_token = $_SESSION["alerts_csrf_token"];
+
+
+// -------------------------------------------------------
+// 4. HANDLE ACKNOWLEDGE BUTTON
+// -------------------------------------------------------
+
+if ($_SERVER["REQUEST_METHOD"] === "POST") {
+
+    $message = "";
+
+    // Check the security token.
+    $submitted_token = $_POST["csrf_token"] ?? "";
+
+    if (
+        !is_string($submitted_token) ||
+        !hash_equals($csrf_token, $submitted_token)
+    ) {
+
+        $message = "Invalid request. Please refresh the page and try again.";
+
+    } else {
+
+        // Read the alert ID.
+        $alert_id = filter_var(
+            $_POST["alert_id"] ?? null,
+            FILTER_VALIDATE_INT
+        );
+
+        if (!$alert_id || $alert_id < 1) {
+
+            $message = "Invalid alert ID.";
+
+        } else {
+
+            /*
+             Only update an alert belonging to this patient.
+
+             acknowledged = 0 means it has not yet
+             been acknowledged.
+
+             NOW() uses the database session time zone
+             set in config.php to +05:30.
+            */
+
+            $update_sql = "
+                UPDATE alerts
+                SET
+                    acknowledged = 1,
+                    acknowledged_at = NOW()
+                WHERE
+                    id = ?
+                    AND patient_id = ?
+                    AND acknowledged = 0
+            ";
+
+            $update_stmt = $conn->prepare($update_sql);
+
+            if (!$update_stmt) {
+
+                error_log(
+                    "Alert acknowledgement prepare error: " .
+                    $conn->error
+                );
+
+                $message = "Unable to acknowledge this alert. Please try again.";
+
+            } else {
+
+                $update_stmt->bind_param(
+                    "is",
+                    $alert_id,
+                    $patient_id
+                );
+
+                if (!$update_stmt->execute()) {
+
+                    error_log(
+                        "Alert acknowledgement execution error: " .
+                        $update_stmt->error
+                    );
+
+                    $message = "Unable to acknowledge this alert. Please try again.";
+
+                } elseif ($update_stmt->affected_rows === 1) {
+
+                    $message = "Alert successfully acknowledged.";
+
+                } else {
+
+                    $message = "This alert was already acknowledged or could not be found.";
+
+                }
+
+                $update_stmt->close();
+            }
+        }
+    }
+
+    // Save message for display after redirect.
+    $_SESSION["alerts_message"] = $message;
+
+    // Redirect to prevent accidental repeated form submission.
+    header("Location: alerts.php");
+    exit;
+}
+
+
+// -------------------------------------------------------
+// 5. DISPLAY MESSAGE AFTER ACKNOWLEDGEMENT
+// -------------------------------------------------------
+
+$alert_message = "";
+
+if (isset($_SESSION["alerts_message"])) {
+
+    $alert_message = $_SESSION["alerts_message"];
+
+    unset($_SESSION["alerts_message"]);
+}
+
+
+// -------------------------------------------------------
+// 6. INITIALIZE ALERT VARIABLES
 // -------------------------------------------------------
 
 $alerts = [];
@@ -50,19 +183,8 @@ $alert_error = "";
 
 
 // -------------------------------------------------------
-// 4. READ ALERTS FROM DATABASE
+// 7. READ LATEST 100 ALERTS
 // -------------------------------------------------------
-
-/*
- IMPORTANT:
-
- We search using patient_id.
-
- This ensures that one patient cannot see another
- patient's alerts.
-
- We display the latest 100 alerts.
-*/
 
 $sql = "
     SELECT
@@ -82,8 +204,6 @@ $sql = "
 
 $stmt = $conn->prepare($sql);
 
-
-// Check whether SQL preparation was successful.
 if (!$stmt) {
 
     error_log("Alerts page SQL error: " . $conn->error);
@@ -92,10 +212,8 @@ if (!$stmt) {
 
 } else {
 
-    // Search only for this logged-in patient.
     $stmt->bind_param("s", $patient_id);
 
-    // Execute the query.
     if (!$stmt->execute()) {
 
         error_log("Alerts page execution error: " . $stmt->error);
@@ -104,37 +222,33 @@ if (!$stmt) {
 
     } else {
 
-        // Variables for database result.
         $alert_id = 0;
         $parameter_name = "";
         $measured_value = "";
-        $alert_message = "";
+        $alert_text = "";
         $recorded_at = "";
         $alert_device_id = "";
         $acknowledged = 0;
         $acknowledged_at = "";
 
-        // Connect database columns to PHP variables.
         $stmt->bind_result(
             $alert_id,
             $parameter_name,
             $measured_value,
-            $alert_message,
+            $alert_text,
             $recorded_at,
             $alert_device_id,
             $acknowledged,
             $acknowledged_at
         );
 
-        // Read each alert.
         while ($stmt->fetch()) {
 
-            // Save the current alert.
             $alerts[] = [
                 "id" => $alert_id,
                 "parameter_name" => $parameter_name,
                 "measured_value" => $measured_value,
-                "alert_message" => $alert_message,
+                "alert_message" => $alert_text,
                 "recorded_at" => $recorded_at,
                 "device_id" => $alert_device_id,
                 "acknowledged" => $acknowledged,
@@ -143,19 +257,13 @@ if (!$stmt) {
         }
     }
 
-    // Close the prepared statement.
     $stmt->close();
 }
 
 
 // -------------------------------------------------------
-// 5. SAFE DISPLAY FUNCTION
+// 8. SAFE DISPLAY FUNCTION
 // -------------------------------------------------------
-
-/*
- This function protects the webpage from unsafe HTML.
- All database text is escaped before display.
-*/
 
 function alert_escape($value)
 {
@@ -168,16 +276,23 @@ function alert_escape($value)
 
 
 // -------------------------------------------------------
-// 6. COUNT ALERTS
+// 9. COUNT ALERTS
 // -------------------------------------------------------
 
 $total_alerts = count($alerts);
 
 $unacknowledged_count = 0;
 
+$acknowledged_count = 0;
+
 foreach ($alerts as $alert) {
 
-    if ((int)$alert["acknowledged"] !== 1) {
+    if ((int)$alert["acknowledged"] === 1) {
+
+        $acknowledged_count++;
+
+    } else {
+
         $unacknowledged_count++;
     }
 }
@@ -207,7 +322,7 @@ foreach ($alerts as $alert) {
         }
 
         .container {
-            max-width: 1100px;
+            max-width: 1200px;
             margin: auto;
         }
 
@@ -240,7 +355,7 @@ foreach ($alerts as $alert) {
             padding: 18px;
             border-radius: 8px;
             flex: 1;
-            min-width: 150px;
+            min-width: 140px;
             box-shadow: 0 2px 6px rgba(0,0,0,0.08);
         }
 
@@ -261,7 +376,7 @@ foreach ($alerts as $alert) {
         table {
             width: 100%;
             border-collapse: collapse;
-            min-width: 850px;
+            min-width: 1000px;
         }
 
         th {
@@ -291,11 +406,27 @@ foreach ($alerts as $alert) {
             font-weight: bold;
         }
 
-        .no-alerts {
-            padding: 25px;
-            text-align: center;
-            color: #16803c;
-            font-size: 17px;
+        .acknowledge-button {
+            background: #16803c;
+            color: white;
+            border: none;
+            padding: 9px 13px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: bold;
+        }
+
+        .acknowledge-button:hover {
+            background: #10632e;
+        }
+
+        .message {
+            background: #e8f5e9;
+            color: #166534;
+            padding: 14px;
+            border-radius: 6px;
+            margin-bottom: 18px;
         }
 
         .error {
@@ -304,6 +435,13 @@ foreach ($alerts as $alert) {
             padding: 15px;
             border-radius: 6px;
             margin-bottom: 15px;
+        }
+
+        .no-alerts {
+            padding: 25px;
+            text-align: center;
+            color: #16803c;
+            font-size: 17px;
         }
 
         .navigation {
@@ -340,7 +478,6 @@ foreach ($alerts as $alert) {
             .summary-box {
                 min-width: 120px;
             }
-
         }
 
     </style>
@@ -353,9 +490,7 @@ foreach ($alerts as $alert) {
 <div class="container">
 
 
-    <!-- ---------------------------------------------
-         PATIENT INFORMATION
-    ---------------------------------------------- -->
+    <!-- PATIENT INFORMATION -->
 
     <div class="header">
 
@@ -386,9 +521,7 @@ foreach ($alerts as $alert) {
     </div>
 
 
-    <!-- ---------------------------------------------
-         NAVIGATION
-    ---------------------------------------------- -->
+    <!-- NAVIGATION -->
 
     <div class="navigation">
 
@@ -403,9 +536,18 @@ foreach ($alerts as $alert) {
     </div>
 
 
-    <!-- ---------------------------------------------
-         ALERT SUMMARY
-    ---------------------------------------------- -->
+    <!-- ACKNOWLEDGEMENT MESSAGE -->
+
+    <?php if ($alert_message !== ""): ?>
+
+        <div class="message">
+            <?php echo alert_escape($alert_message); ?>
+        </div>
+
+    <?php endif; ?>
+
+
+    <!-- SUMMARY -->
 
     <div class="summary">
 
@@ -424,10 +566,22 @@ foreach ($alerts as $alert) {
 
             Unacknowledged Alerts
 
-            <div class="summary-number"
-                 style="color:#b42318;">
+            <div class="summary-number" style="color:#b42318;">
 
                 <?php echo $unacknowledged_count; ?>
+
+            </div>
+
+        </div>
+
+
+        <div class="summary-box">
+
+            Acknowledged Alerts
+
+            <div class="summary-number" style="color:#16803c;">
+
+                <?php echo $acknowledged_count; ?>
 
             </div>
 
@@ -436,9 +590,7 @@ foreach ($alerts as $alert) {
     </div>
 
 
-    <!-- ---------------------------------------------
-         DISPLAY DATABASE ERROR IF ANY
-    ---------------------------------------------- -->
+    <!-- DATABASE ERROR -->
 
     <?php if ($alert_error !== ""): ?>
 
@@ -449,26 +601,19 @@ foreach ($alerts as $alert) {
     <?php endif; ?>
 
 
-    <!-- ---------------------------------------------
-         ALERT TABLE
-    ---------------------------------------------- -->
+    <!-- ALERT TABLE -->
 
     <div class="alert-table-box">
 
         <h3>Latest Patient Alerts</h3>
 
-
         <?php if ($alert_error === "" && $total_alerts === 0): ?>
 
             <div class="no-alerts">
-
                 No alerts are available for this patient.
-
             </div>
 
-
         <?php elseif ($alert_error === ""): ?>
-
 
             <table>
 
@@ -477,18 +622,12 @@ foreach ($alerts as $alert) {
                     <tr>
 
                         <th>Alert ID</th>
-
                         <th>Date / Time</th>
-
                         <th>Parameter</th>
-
                         <th>Measured Value</th>
-
                         <th>Alert Message</th>
-
                         <th>Device ID</th>
-
-                        <th>Status</th>
+                        <th>Status / Action</th>
 
                     </tr>
 
@@ -502,18 +641,12 @@ foreach ($alerts as $alert) {
                         <tr>
 
                             <td>
-                                <?php
-                                echo alert_escape($alert["id"]);
-                                ?>
+                                <?php echo alert_escape($alert["id"]); ?>
                             </td>
-
 
                             <td>
-                                <?php
-                                echo alert_escape($alert["recorded_at"]);
-                                ?>
+                                <?php echo alert_escape($alert["recorded_at"]); ?>
                             </td>
-
 
                             <td>
                                 <strong>
@@ -525,7 +658,6 @@ foreach ($alerts as $alert) {
                                 </strong>
                             </td>
 
-
                             <td>
                                 <?php
                                 echo alert_escape(
@@ -533,7 +665,6 @@ foreach ($alerts as $alert) {
                                 );
                                 ?>
                             </td>
-
 
                             <td>
                                 <?php
@@ -543,7 +674,6 @@ foreach ($alerts as $alert) {
                                 ?>
                             </td>
 
-
                             <td>
                                 <?php
                                 echo alert_escape(
@@ -551,7 +681,6 @@ foreach ($alerts as $alert) {
                                 );
                                 ?>
                             </td>
-
 
                             <td>
 
@@ -567,9 +696,10 @@ foreach ($alerts as $alert) {
                                         !empty($alert["acknowledged_at"])
                                     ): ?>
 
-                                        <br>
+                                        <br><br>
 
                                         <small>
+                                            Acknowledged at:<br>
                                             <?php
                                             echo alert_escape(
                                                 $alert["acknowledged_at"]
@@ -585,6 +715,39 @@ foreach ($alerts as $alert) {
                                         Not Acknowledged
                                     </span>
 
+                                    <br><br>
+
+                                    <!-- ACKNOWLEDGE BUTTON -->
+
+                                    <form method="POST"
+                                          action="alerts.php">
+
+                                        <input
+                                            type="hidden"
+                                            name="csrf_token"
+                                            value="<?php
+                                            echo alert_escape($csrf_token);
+                                            ?>"
+                                        >
+
+                                        <input
+                                            type="hidden"
+                                            name="alert_id"
+                                            value="<?php
+                                            echo alert_escape($alert["id"]);
+                                            ?>"
+                                        >
+
+                                        <button
+                                            type="submit"
+                                            class="acknowledge-button"
+                                            onclick="return confirm('Are you sure you want to acknowledge this alert?');"
+                                        >
+                                            Acknowledge
+                                        </button>
+
+                                    </form>
+
                                 <?php endif; ?>
 
                             </td>
@@ -597,15 +760,12 @@ foreach ($alerts as $alert) {
 
             </table>
 
-
         <?php endif; ?>
 
     </div>
 
 
-    <!-- ---------------------------------------------
-         FOOTER
-    ---------------------------------------------- -->
+    <!-- FOOTER -->
 
     <div class="footer">
 
