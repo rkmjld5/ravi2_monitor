@@ -1,3 +1,4 @@
+
 <?php
 /*
     PROJECT: ravi2_patient
@@ -9,17 +10,17 @@
     FEATURES:
     1. Displays the latest monitoring readings.
     2. Displays the latest 10 patient alerts.
-    3. Refreshes automatically every 5 seconds.
-    4. Checks patient and device authorization.
-    5. Provides navigation to other patient pages.
-
-    DATABASE TABLES USED:
-    - monitoring_readings
-    - alerts
+    3. Allows the patient to acknowledge individual alerts.
+    4. Records acknowledgement date and time.
+    5. Refreshes automatically every 5 seconds.
+    6. Checks patient and device authorization.
+    7. Provides navigation to other patient pages.
 
     IMPORTANT:
-    This program does not change any database records.
-    It does not modify patient_remote.onrender.com.
+    - Only the logged-in patient can acknowledge their own alerts.
+    - Existing alert records are never deleted.
+    - P1001 records and historical alerts are not modified.
+    - Uses mysqli.
 */
 
 // --------------------------------------------------
@@ -28,8 +29,8 @@
 
 require_once __DIR__ . "/patient_access.php";
 
-// patient_access.php also loads config.php.
-// The database connection is available as $conn.
+// patient_access.php loads config.php and starts
+// the authorized patient session.
 
 // --------------------------------------------------
 // 2. GET PATIENT INFORMATION FROM SESSION
@@ -40,7 +41,185 @@ $patient_name = $_SESSION["ravi2_patient_name"];
 $device_id    = $_SESSION["ravi2_device_id"];
 
 // --------------------------------------------------
-// 3. PREPARE VARIABLES FOR DISPLAY
+// 3. CREATE CSRF TOKEN
+// --------------------------------------------------
+
+/*
+   This token protects the acknowledgement form.
+
+   It prevents another website from submitting an
+   acknowledgement request using the patient's login.
+*/
+
+if (empty($_SESSION["dashboard_csrf_token"])) {
+
+    $_SESSION["dashboard_csrf_token"] = bin2hex(
+        random_bytes(32)
+    );
+}
+
+$csrf_token = $_SESSION["dashboard_csrf_token"];
+
+// --------------------------------------------------
+// 4. PROCESS ACKNOWLEDGEMENT REQUEST
+// --------------------------------------------------
+
+$acknowledge_error = "";
+$acknowledge_success = "";
+
+if ($_SERVER["REQUEST_METHOD"] === "POST") {
+
+    // Check the CSRF token first.
+
+    $submitted_token = $_POST["csrf_token"] ?? "";
+
+    if (
+        !is_string($submitted_token) ||
+        !hash_equals($csrf_token, $submitted_token)
+    ) {
+
+        $acknowledge_error =
+            "Security check failed. Please refresh the page and try again.";
+
+    } else {
+
+        // Read the alert ID submitted by the button.
+
+        $posted_alert_id = $_POST["alert_id"] ?? "";
+
+        if (
+            !is_scalar($posted_alert_id) ||
+            !ctype_digit((string)$posted_alert_id) ||
+            (int)$posted_alert_id < 1
+        ) {
+
+            $acknowledge_error = "Invalid alert selected.";
+
+        } else {
+
+            $posted_alert_id = (int)$posted_alert_id;
+
+            /*
+               IMPORTANT SECURITY CHECK:
+
+               The UPDATE includes patient_id.
+
+               Therefore, a patient cannot acknowledge
+               another patient's alert by changing the ID.
+            */
+
+            $ack_sql = "
+                UPDATE alerts
+                SET
+                    acknowledged = 1,
+                    acknowledged_at = NOW()
+                WHERE
+                    id = ?
+                    AND patient_id = ?
+                    AND acknowledged = 0
+            ";
+
+            $ack_stmt = $conn->prepare($ack_sql);
+
+            if (!$ack_stmt) {
+
+                error_log(
+                    "Alert acknowledgement prepare error: " .
+                    $conn->error
+                );
+
+                $acknowledge_error =
+                    "Unable to acknowledge the alert. Please try again.";
+
+            } else {
+
+                $ack_stmt->bind_param(
+                    "is",
+                    $posted_alert_id,
+                    $patient_id
+                );
+
+                if (!$ack_stmt->execute()) {
+
+                    error_log(
+                        "Alert acknowledgement execution error: " .
+                        $ack_stmt->error
+                    );
+
+                    $acknowledge_error =
+                        "Unable to acknowledge the alert. Please try again.";
+
+                } elseif ($ack_stmt->affected_rows === 1) {
+
+                    // The selected alert was acknowledged.
+
+                    $acknowledge_success =
+                        "Alert acknowledged successfully.";
+
+                } else {
+
+                    /*
+                       No row was changed.
+
+                       The alert may already be acknowledged,
+                       or it may not belong to this patient.
+                    */
+
+                    $acknowledge_error =
+                        "This alert is already acknowledged or is not available.";
+                }
+
+                $ack_stmt->close();
+            }
+        }
+    }
+
+    /*
+       Redirect after processing the POST request.
+
+       This prevents the browser from submitting the
+       same acknowledgement again when the page refreshes.
+
+       The message is stored temporarily in the session.
+    */
+
+    if ($acknowledge_success !== "") {
+
+        $_SESSION["dashboard_ack_message"] =
+            $acknowledge_success;
+
+    } elseif ($acknowledge_error !== "") {
+
+        $_SESSION["dashboard_ack_error"] =
+            $acknowledge_error;
+    }
+
+    header("Location: index.php");
+    exit;
+}
+
+// --------------------------------------------------
+// 5. GET ACKNOWLEDGEMENT MESSAGE AFTER REDIRECT
+// --------------------------------------------------
+
+if (isset($_SESSION["dashboard_ack_message"])) {
+
+    $acknowledge_success =
+        $_SESSION["dashboard_ack_message"];
+
+    unset($_SESSION["dashboard_ack_message"]);
+}
+
+if (isset($_SESSION["dashboard_ack_error"])) {
+
+    $acknowledge_error =
+        $_SESSION["dashboard_ack_error"];
+
+    unset($_SESSION["dashboard_ack_error"]);
+}
+
+// --------------------------------------------------
+// 6. PREPARE VARIABLES FOR DISPLAY
 // --------------------------------------------------
 
 $reading = null;
@@ -50,16 +229,8 @@ $reading_error = "";
 $alert_error = "";
 
 // --------------------------------------------------
-// 4. GET THE LATEST MONITORING READING
+// 7. GET THE LATEST MONITORING READING
 // --------------------------------------------------
-
-/*
-   We select only readings belonging to this patient
-   and this patient's assigned device.
-
-   The newest reading is selected using:
-   recorded_at DESC, id DESC
-*/
 
 $reading_sql = "
     SELECT
@@ -93,7 +264,10 @@ if (!$reading_stmt) {
 
     if (!$reading_stmt->execute()) {
 
-        error_log("Dashboard reading execution error: " . $reading_stmt->error);
+        error_log(
+            "Dashboard reading execution error: " .
+            $reading_stmt->error
+        );
 
         $reading_error = "Unable to load monitoring readings.";
 
@@ -129,18 +303,8 @@ if (!$reading_stmt) {
 }
 
 // --------------------------------------------------
-// 5. GET THE LATEST 10 PATIENT ALERTS
+// 8. GET THE LATEST 10 PATIENT ALERTS
 // --------------------------------------------------
-
-/*
-   Alerts are selected using patient_id.
-
-   This allows the patient to see alerts generated
-   for their monitoring account.
-
-   No email or mobile notification is sent here.
-   Alerts are displayed only on this web dashboard.
-*/
 
 $alert_sql = "
     SELECT
@@ -172,7 +336,10 @@ if (!$alert_stmt) {
 
     if (!$alert_stmt->execute()) {
 
-        error_log("Dashboard alert execution error: " . $alert_stmt->error);
+        error_log(
+            "Dashboard alert execution error: " .
+            $alert_stmt->error
+        );
 
         $alert_error = "Unable to load alerts.";
 
@@ -208,13 +375,8 @@ if (!$alert_stmt) {
 }
 
 // --------------------------------------------------
-// 6. SAFE OUTPUT FUNCTION
+// 9. SAFE OUTPUT FUNCTION
 // --------------------------------------------------
-
-/*
-   This function protects the dashboard when displaying
-   text obtained from the database.
-*/
 
 function dashboard_escape($value) {
 
@@ -230,7 +392,7 @@ function dashboard_escape($value) {
 }
 
 // --------------------------------------------------
-// 7. DISPLAY A READING VALUE
+// 10. DISPLAY A READING VALUE
 // --------------------------------------------------
 
 function show_reading($value, $unit = "") {
@@ -369,6 +531,18 @@ function show_reading($value, $unit = "") {
             margin-bottom: 15px;
         }
 
+        .success-message {
+            background: #d9f2e3;
+            color: #146c43;
+            border-left: 4px solid #198754;
+        }
+
+        .error-message {
+            background: #fce8e8;
+            color: #a12626;
+            border-left: 4px solid #c0392b;
+        }
+
         .alert-card {
             background: white;
             border-radius: 8px;
@@ -415,6 +589,25 @@ function show_reading($value, $unit = "") {
         .status-done {
             background: #d9f2e3;
             color: #146c43;
+        }
+
+        .acknowledge-form {
+            margin-top: 14px;
+        }
+
+        .acknowledge-button {
+            background: #198754;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            padding: 10px 17px;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        .acknowledge-button:hover {
+            background: #146c43;
         }
 
         .navigation {
@@ -481,10 +674,6 @@ function show_reading($value, $unit = "") {
 
 <body>
 
-    <!-- -----------------------------------------
-         TOP HEADER
-    ------------------------------------------ -->
-
     <div class="header">
 
         <h1>Patient Monitoring System</h1>
@@ -496,9 +685,7 @@ function show_reading($value, $unit = "") {
 
     <div class="container">
 
-        <!-- -------------------------------------
-             PATIENT INFORMATION
-        -------------------------------------- -->
+        <!-- PATIENT INFORMATION -->
 
         <div class="patient-info">
 
@@ -528,9 +715,7 @@ function show_reading($value, $unit = "") {
         </div>
 
 
-        <!-- -------------------------------------
-             LATEST MONITORING READINGS
-        -------------------------------------- -->
+        <!-- LATEST MONITORING READINGS -->
 
         <h2 class="section-title">
             Latest Monitoring Readings
@@ -668,13 +853,29 @@ function show_reading($value, $unit = "") {
         <?php endif; ?>
 
 
-        <!-- -------------------------------------
-             PATIENT WEB ALERTS
-        -------------------------------------- -->
+        <!-- PATIENT WEB ALERTS -->
 
         <h2 class="section-title">
             Latest Web Alerts
         </h2>
+
+        <?php if ($acknowledge_success !== ""): ?>
+
+            <div class="message success-message">
+                <?php echo dashboard_escape($acknowledge_success); ?>
+            </div>
+
+        <?php endif; ?>
+
+
+        <?php if ($acknowledge_error !== ""): ?>
+
+            <div class="message error-message">
+                <?php echo dashboard_escape($acknowledge_error); ?>
+            </div>
+
+        <?php endif; ?>
+
 
         <?php if ($alert_error !== ""): ?>
 
@@ -766,6 +967,7 @@ function show_reading($value, $unit = "") {
                             );
                         ?>
 
+
                         <?php if ((int)$alert["acknowledged"] === 1): ?>
 
                             <br>
@@ -782,6 +984,44 @@ function show_reading($value, $unit = "") {
 
                     </div>
 
+
+                    <!-- SHOW BUTTON ONLY FOR PENDING ALERTS -->
+
+                    <?php if ((int)$alert["acknowledged"] !== 1): ?>
+
+                        <form
+                            method="POST"
+                            action="index.php"
+                            class="acknowledge-form"
+                        >
+
+                            <input
+                                type="hidden"
+                                name="csrf_token"
+                                value="<?php
+                                    echo dashboard_escape($csrf_token);
+                                ?>"
+                            >
+
+                            <input
+                                type="hidden"
+                                name="alert_id"
+                                value="<?php
+                                    echo (int)$alert["id"];
+                                ?>"
+                            >
+
+                            <button
+                                type="submit"
+                                class="acknowledge-button"
+                            >
+                                Acknowledge Alert
+                            </button>
+
+                        </form>
+
+                    <?php endif; ?>
+
                 </div>
 
             <?php endforeach; ?>
@@ -789,9 +1029,7 @@ function show_reading($value, $unit = "") {
         <?php endif; ?>
 
 
-        <!-- -------------------------------------
-             NAVIGATION LINKS
-        -------------------------------------- -->
+        <!-- NAVIGATION LINKS -->
 
         <div class="navigation">
 
