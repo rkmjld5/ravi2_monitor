@@ -3,22 +3,25 @@
     ECG HISTORY PAGE
     Project: ravi2_patient
 
-    This page:
-    1. Checks that the patient is logged in and authorized.
+    Features:
+    1. Checks patient login and authorization.
     2. Reads ECG records from ecg_readings.
-    3. Allows searching by start and end DATE AND TIME.
-    4. Displays ECG sample rate and sample count.
-    5. Draws the ECG waveform when valid samples are available.
+    3. Searches by start and end date/time.
+    4. Displays ECG waveform, sample rate and sample count.
+    5. Downloads ECG graph as PNG.
+    6. Downloads ECG report as PDF.
+    7. Downloads original ECG samples as CSV.
 
-    The page does not change any database records.
+    IMPORTANT:
+    This page does not change or delete database records.
 */
 
-// Check patient login and current authorization first.
+// Check patient login and authorization first.
 require_once "patient_access.php";
 
 date_default_timezone_set("Asia/Kolkata");
 
-// Patient and device details from the verified session.
+// Patient and device details from verified session.
 $patientId = $_SESSION["ravi2_patient_id"];
 $patientName = $_SESSION["ravi2_patient_name"];
 $deviceId = $_SESSION["ravi2_device_id"];
@@ -35,7 +38,6 @@ $endDateTime   = "9999-12-31 23:59:59";
 
 $errorMessage = "";
 
-// Convert a datetime-local value into MySQL datetime.
 function convertDateTime($value)
 {
     if ($value === "") {
@@ -71,10 +73,7 @@ if ($endInput !== "" && $errorMessage === "") {
     }
 }
 
-if (
-    $errorMessage === "" &&
-    $startDateTime > $endDateTime
-) {
+if ($errorMessage === "" && $startDateTime > $endDateTime) {
     $errorMessage = "Start date and time cannot be later than end date and time.";
 }
 
@@ -86,12 +85,7 @@ $records = [];
 
 if ($errorMessage === "") {
 
-    /*
-       We use both patient_id and device_id.
-       This ensures that the patient sees only ECG
-       records belonging to their assigned device.
-    */
-
+    // Both patient_id and device_id are checked.
     $sql = "
         SELECT
             id,
@@ -140,7 +134,6 @@ if ($errorMessage === "") {
 
             while (mysqli_stmt_fetch($stmt)) {
 
-                // Store each ECG record for display.
                 $records[] = [
                     "id" => $id,
                     "samples_json" => $samplesJson,
@@ -157,7 +150,7 @@ if ($errorMessage === "") {
 }
 
 // --------------------------------------------------
-// PREPARE ECG SAMPLES FOR WAVEFORM DISPLAY
+// PREPARE ECG SAMPLES
 // --------------------------------------------------
 
 function getEcgSamples($json)
@@ -168,8 +161,7 @@ function getEcgSamples($json)
         return [];
     }
 
-    // Normally samples_json contains a direct numeric array.
-    // Also support common named array formats.
+    // Support common ECG JSON formats.
     if (isset($data["ecg_samples"]) && is_array($data["ecg_samples"])) {
         $data = $data["ecg_samples"];
     } elseif (isset($data["samples"]) && is_array($data["samples"])) {
@@ -181,8 +173,6 @@ function getEcgSamples($json)
     $samples = [];
 
     foreach ($data as $value) {
-
-        // Keep only numeric ECG sample values.
         if (is_numeric($value)) {
             $samples[] = (float)$value;
         }
@@ -204,6 +194,9 @@ function getEcgSamples($json)
 
 <title>ECG History</title>
 
+<!-- jsPDF library for creating PDF reports in the browser -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
 <style>
 body {
     font-family: Arial, sans-serif;
@@ -218,16 +211,19 @@ body {
     margin: auto;
 }
 
-.header {
-    background: #ffffff;
+.header, .search-box, .record {
+    background: white;
     padding: 20px;
     border-radius: 8px;
     margin-bottom: 18px;
 }
 
+.header h2, .record h3 {
+    color: #174a75;
+}
+
 .header h2 {
     margin-top: 0;
-    color: #174a75;
 }
 
 .navigation {
@@ -246,13 +242,6 @@ body {
 
 .navigation a:hover {
     background: #103653;
-}
-
-.search-box {
-    background: white;
-    padding: 20px;
-    border-radius: 8px;
-    margin-bottom: 18px;
 }
 
 .search-box h3 {
@@ -285,17 +274,21 @@ body {
 }
 
 button {
-    padding: 11px 20px;
+    padding: 10px 15px;
     border: none;
-    background: #16804a;
     color: white;
     border-radius: 5px;
     cursor: pointer;
-    margin-top: 15px;
+    margin: 6px 5px 6px 0;
 }
 
 button:hover {
-    background: #105d35;
+    opacity: 0.85;
+}
+
+.search-button {
+    background: #16804a;
+    margin-top: 15px;
 }
 
 .clear-button {
@@ -309,16 +302,11 @@ button:hover {
 }
 
 .record {
-    background: white;
-    padding: 18px;
-    border-radius: 8px;
-    margin-bottom: 18px;
     overflow: hidden;
 }
 
 .record h3 {
     margin-top: 0;
-    color: #174a75;
 }
 
 .record-details {
@@ -348,6 +336,24 @@ button:hover {
     padding: 15px;
     background: #f7f7f7;
     border-radius: 5px;
+}
+
+.download-buttons {
+    margin-top: 15px;
+    padding-top: 12px;
+    border-top: 1px solid #ddd;
+}
+
+.png-button {
+    background: #1769aa;
+}
+
+.pdf-button {
+    background: #c62828;
+}
+
+.csv-button {
+    background: #16804a;
 }
 
 .error {
@@ -431,9 +437,7 @@ button:hover {
             <div class="search-row">
 
                 <div class="search-field">
-                    <label for="start_datetime">
-                        Start Date and Time
-                    </label>
+                    <label for="start_datetime">Start Date and Time</label>
 
                     <input
                         type="datetime-local"
@@ -444,9 +448,7 @@ button:hover {
                 </div>
 
                 <div class="search-field">
-                    <label for="end_datetime">
-                        End Date and Time
-                    </label>
+                    <label for="end_datetime">End Date and Time</label>
 
                     <input
                         type="datetime-local"
@@ -458,11 +460,9 @@ button:hover {
 
             </div>
 
-            <button type="submit">Search ECG</button>
+            <button class="search-button" type="submit">Search ECG</button>
 
-            <a class="clear-button" href="ecg_history.php">
-                Show All
-            </a>
+            <a class="clear-button" href="ecg_history.php">Show All</a>
 
         </form>
 
@@ -498,10 +498,7 @@ button:hover {
                 <?php
                     $samples = getEcgSamples($record["samples_json"]);
 
-                    /*
-                       Limit waveform data to 2000 samples per record
-                       to keep the browser display manageable.
-                    */
+                    // Display up to 2000 samples in the graph.
                     $displaySamples = array_slice($samples, 0, 2000);
 
                     $samplesForJavascript = json_encode(
@@ -511,53 +508,48 @@ button:hover {
                         JSON_HEX_QUOT |
                         JSON_HEX_AMP
                     );
+
+                    if ($samplesForJavascript === false) {
+                        $samplesForJavascript = "[]";
+                    }
+
+                    $recordId = (string)$record["id"];
                 ?>
 
-                <div class="record">
+                <div
+                    class="record"
+                    data-record-id="<?php echo htmlspecialchars($recordId); ?>"
+                    data-patient-id="<?php echo htmlspecialchars($patientId); ?>"
+                    data-patient-name="<?php echo htmlspecialchars($patientName); ?>"
+                    data-device-id="<?php echo htmlspecialchars($deviceId); ?>"
+                    data-recorded-at="<?php echo htmlspecialchars((string)$record["recorded_at"]); ?>"
+                    data-sample-rate="<?php echo htmlspecialchars((string)($record["sample_rate"] ?? "N/A")); ?>"
+                    data-sample-count="<?php echo htmlspecialchars((string)($record["sample_count"] ?? count($samples))); ?>"
+                    data-mode="<?php echo htmlspecialchars((string)($record["mode"] ?? "N/A")); ?>"
+                >
 
-                    <h3>
-                        ECG Record #<?php
-                            echo htmlspecialchars((string)$record["id"]);
-                        ?>
-                    </h3>
+                    <h3>ECG Record #<?php echo htmlspecialchars($recordId); ?></h3>
 
                     <div class="record-details">
 
                         <div class="detail">
                             <strong>Recorded At:</strong><br>
-                            <?php
-                                echo htmlspecialchars(
-                                    (string)$record["recorded_at"]
-                                );
-                            ?>
+                            <?php echo htmlspecialchars((string)$record["recorded_at"]); ?>
                         </div>
 
                         <div class="detail">
                             <strong>Sample Rate:</strong><br>
-                            <?php
-                                echo htmlspecialchars(
-                                    (string)($record["sample_rate"] ?? "N/A")
-                                );
-                            ?>
-                            Hz
+                            <?php echo htmlspecialchars((string)($record["sample_rate"] ?? "N/A")); ?> Hz
                         </div>
 
                         <div class="detail">
                             <strong>Sample Count:</strong><br>
-                            <?php
-                                echo htmlspecialchars(
-                                    (string)($record["sample_count"] ?? count($samples))
-                                );
-                            ?>
+                            <?php echo htmlspecialchars((string)($record["sample_count"] ?? count($samples))); ?>
                         </div>
 
                         <div class="detail">
                             <strong>Mode:</strong><br>
-                            <?php
-                                echo htmlspecialchars(
-                                    (string)($record["mode"] ?? "N/A")
-                                );
-                            ?>
+                            <?php echo htmlspecialchars((string)($record["mode"] ?? "N/A")); ?>
                         </div>
 
                     </div>
@@ -579,11 +571,32 @@ button:hover {
 
                         <p>
                             <small>
-                                Displaying <?php
-                                    echo count($displaySamples);
-                                ?> numeric ECG samples.
+                                Displaying <?php echo count($displaySamples); ?>
+                                numeric ECG samples.
                             </small>
                         </p>
+
+                        <!-- Three download buttons for this ECG recording -->
+                        <div class="download-buttons">
+
+                            <strong>Download this ECG recording:</strong><br>
+
+                            <button type="button" class="png-button"
+                                onclick="downloadPNG(this)">
+                                Download PNG
+                            </button>
+
+                            <button type="button" class="pdf-button"
+                                onclick="downloadPDF(this)">
+                                Download PDF
+                            </button>
+
+                            <button type="button" class="csv-button"
+                                onclick="downloadCSV(this)">
+                                Download CSV
+                            </button>
+
+                        </div>
 
                     <?php else: ?>
 
@@ -606,90 +619,325 @@ button:hover {
 </div>
 
 <script>
-// Draw each ECG waveform on its canvas.
-document.querySelectorAll(".waveform").forEach(function(canvas) {
+
+// --------------------------------------------------
+// DRAW ECG WAVEFORMS
+// --------------------------------------------------
+
+function drawWaveforms() {
+
+    document.querySelectorAll(".waveform").forEach(function(canvas) {
+
+        let samples = [];
+
+        try {
+            samples = JSON.parse(canvas.dataset.values);
+        } catch (error) {
+            return;
+        }
+
+        if (!Array.isArray(samples) || samples.length < 2) {
+            return;
+        }
+
+        const context = canvas.getContext("2d");
+
+        const width = canvas.clientWidth;
+        const height = canvas.clientHeight;
+
+        if (width <= 0 || height <= 0) {
+            return;
+        }
+
+        const pixelRatio = window.devicePixelRatio || 1;
+
+        canvas.width = width * pixelRatio;
+        canvas.height = height * pixelRatio;
+
+        context.scale(pixelRatio, pixelRatio);
+
+        // Find minimum and maximum values safely.
+        let minimum = samples[0];
+        let maximum = samples[0];
+
+        samples.forEach(function(value) {
+            minimum = Math.min(minimum, value);
+            maximum = Math.max(maximum, value);
+        });
+
+        if (minimum === maximum) {
+            minimum -= 1;
+            maximum += 1;
+        }
+
+        const padding = 12;
+        const usableHeight = height - (padding * 2);
+        const usableWidth = width - (padding * 2);
+
+        // Draw ECG background grid.
+        context.strokeStyle = "#f0dede";
+        context.lineWidth = 0.5;
+
+        for (let x = 0; x < width; x += 20) {
+            context.beginPath();
+            context.moveTo(x, 0);
+            context.lineTo(x, height);
+            context.stroke();
+        }
+
+        for (let y = 0; y < height; y += 20) {
+            context.beginPath();
+            context.moveTo(0, y);
+            context.lineTo(width, y);
+            context.stroke();
+        }
+
+        // Draw ECG line.
+        context.beginPath();
+        context.strokeStyle = "#cc2222";
+        context.lineWidth = 1.5;
+
+        samples.forEach(function(value, index) {
+
+            const x = padding +
+                (index / (samples.length - 1)) * usableWidth;
+
+            const y = padding +
+                ((maximum - value) / (maximum - minimum)) * usableHeight;
+
+            if (index === 0) {
+                context.moveTo(x, y);
+            } else {
+                context.lineTo(x, y);
+            }
+        });
+
+        context.stroke();
+
+    });
+}
+
+// Draw the graphs after the page has loaded.
+window.addEventListener("load", drawWaveforms);
+
+
+// --------------------------------------------------
+// GET RECORD INFORMATION
+// --------------------------------------------------
+
+function getRecordInformation(button) {
+
+    const record = button.closest(".record");
+
+    const canvas = record.querySelector(".waveform");
 
     let samples = [];
 
     try {
         samples = JSON.parse(canvas.dataset.values);
     } catch (error) {
+        alert("Unable to read ECG sample values.");
+        return null;
+    }
+
+    return {
+        record: record,
+        canvas: canvas,
+        samples: samples,
+        id: record.dataset.recordId,
+        patientId: record.dataset.patientId,
+        patientName: record.dataset.patientName,
+        deviceId: record.dataset.deviceId,
+        recordedAt: record.dataset.recordedAt,
+        sampleRate: record.dataset.sampleRate,
+        sampleCount: record.dataset.sampleCount,
+        mode: record.dataset.mode
+    };
+}
+
+
+// --------------------------------------------------
+// DOWNLOAD 1: ECG GRAPH AS PNG
+// --------------------------------------------------
+
+function downloadPNG(button) {
+
+    const info = getRecordInformation(button);
+
+    if (!info) {
         return;
     }
 
-    if (!Array.isArray(samples) || samples.length < 2) {
+    // Export the actual ECG canvas as a PNG image.
+    const image = info.canvas.toDataURL("image/png");
+
+    const link = document.createElement("a");
+
+    link.href = image;
+
+    link.download = "ECG_Record_" + info.id + ".png";
+
+    document.body.appendChild(link);
+
+    link.click();
+
+    document.body.removeChild(link);
+}
+
+
+// --------------------------------------------------
+// DOWNLOAD 2: ECG REPORT AS PDF
+// --------------------------------------------------
+
+function downloadPDF(button) {
+
+    const info = getRecordInformation(button);
+
+    if (!info) {
         return;
     }
 
-    const context = canvas.getContext("2d");
-
-    // Use the actual displayed canvas size.
-    const width = canvas.clientWidth;
-    const height = canvas.clientHeight;
-
-    // Make the drawing clear on high-resolution screens.
-    const pixelRatio = window.devicePixelRatio || 1;
-
-    canvas.width = width * pixelRatio;
-    canvas.height = height * pixelRatio;
-
-    context.scale(pixelRatio, pixelRatio);
-
-    // Find the minimum and maximum ECG values.
-    let minimum = Math.min(...samples);
-    let maximum = Math.max(...samples);
-
-    // Avoid division by zero when all values are equal.
-    if (minimum === maximum) {
-        minimum -= 1;
-        maximum += 1;
+    // Check that the PDF library has loaded.
+    if (!window.jspdf || !window.jspdf.jsPDF) {
+        alert(
+            "PDF library could not be loaded. " +
+            "Please check your internet connection and try again."
+        );
+        return;
     }
 
-    const padding = 12;
-    const usableHeight = height - (padding * 2);
-    const usableWidth = width - (padding * 2);
+    const { jsPDF } = window.jspdf;
 
-    // Draw a light ECG grid.
-    context.strokeStyle = "#f0dede";
-    context.lineWidth = 0.5;
+    // Create an A4 PDF document.
+    const pdf = new jsPDF("p", "mm", "a4");
 
-    for (let x = 0; x < width; x += 20) {
-        context.beginPath();
-        context.moveTo(x, 0);
-        context.lineTo(x, height);
-        context.stroke();
+    // Report heading.
+    pdf.setFontSize(18);
+    pdf.text("ECG Recording Report", 15, 18);
+
+    pdf.setFontSize(11);
+
+    // Patient details.
+    pdf.text("Patient Name: " + info.patientName, 15, 32);
+    pdf.text("Patient ID: " + info.patientId, 15, 40);
+    pdf.text("Device ID: " + info.deviceId, 15, 48);
+
+    // Recording details.
+    pdf.text("ECG Record ID: " + info.id, 15, 60);
+    pdf.text("Recorded At: " + info.recordedAt, 15, 68);
+    pdf.text("Sample Rate: " + info.sampleRate + " Hz", 15, 76);
+    pdf.text("Sample Count: " + info.sampleCount, 15, 84);
+    pdf.text("Mode: " + info.mode, 15, 92);
+
+    // Add the ECG graph to the PDF.
+    const graphImage = info.canvas.toDataURL("image/png");
+
+    pdf.setFontSize(13);
+    pdf.text("ECG Waveform", 15, 108);
+
+    pdf.addImage(
+        graphImage,
+        "PNG",
+        15,
+        115,
+        180,
+        65
+    );
+
+    // Add a note about the recording.
+    pdf.setFontSize(9);
+    pdf.text(
+        "This report contains the stored ECG sample waveform.",
+        15,
+        192
+    );
+
+    pdf.text(
+        "For clinical interpretation, consult a qualified medical professional.",
+        15,
+        199
+    );
+
+    // Save the PDF file.
+    pdf.save("ECG_Record_" + info.id + ".pdf");
+}
+
+
+// --------------------------------------------------
+// DOWNLOAD 3: ORIGINAL ECG SAMPLES AS CSV
+// --------------------------------------------------
+
+function downloadCSV(button) {
+
+    const info = getRecordInformation(button);
+
+    if (!info) {
+        return;
     }
 
-    for (let y = 0; y < height; y += 20) {
-        context.beginPath();
-        context.moveTo(0, y);
-        context.lineTo(width, y);
-        context.stroke();
+    if (!Array.isArray(info.samples) || info.samples.length === 0) {
+        alert("No numeric ECG samples are available for CSV download.");
+        return;
     }
 
-    // Draw the ECG waveform.
-    context.beginPath();
-    context.strokeStyle = "#cc2222";
-    context.lineWidth = 1.5;
+    // Prepare CSV content.
+    let csv = "";
 
-    samples.forEach(function(value, index) {
+    // First section: recording details.
+    csv += "ECG Recording Details\n";
+    csv += "Patient Name," + csvEscape(info.patientName) + "\n";
+    csv += "Patient ID," + csvEscape(info.patientId) + "\n";
+    csv += "Device ID," + csvEscape(info.deviceId) + "\n";
+    csv += "Record ID," + csvEscape(info.id) + "\n";
+    csv += "Recorded At," + csvEscape(info.recordedAt) + "\n";
+    csv += "Sample Rate," + csvEscape(info.sampleRate) + "\n";
+    csv += "Sample Count," + csvEscape(info.sampleCount) + "\n";
+    csv += "Mode," + csvEscape(info.mode) + "\n";
 
-        const x = padding +
-            (index / (samples.length - 1)) * usableWidth;
+    // Blank line before sample values.
+    csv += "\n";
 
-        const y = padding +
-            ((maximum - value) / (maximum - minimum)) * usableHeight;
+    // Second section: original numeric ECG samples.
+    csv += "Sample Number,ECG Value\n";
 
-        if (index === 0) {
-            context.moveTo(x, y);
-        } else {
-            context.lineTo(x, y);
-        }
+    info.samples.forEach(function(value, index) {
+
+        csv += (index + 1) + "," + value + "\n";
+
     });
 
-    context.stroke();
+    // Create a downloadable CSV file.
+    const blob = new Blob(
+        ["\uFEFF" + csv],
+        { type: "text/csv;charset=utf-8;" }
+    );
 
-});
+    const url = URL.createObjectURL(blob);
+
+    const link = document.createElement("a");
+
+    link.href = url;
+
+    link.download = "ECG_Record_" + info.id + ".csv";
+
+    document.body.appendChild(link);
+
+    link.click();
+
+    document.body.removeChild(link);
+
+    URL.revokeObjectURL(url);
+}
+
+
+// Escape text fields for CSV format.
+function csvEscape(value) {
+
+    let text = String(value ?? "");
+
+    return '"' + text.replace(/"/g, '""') + '"';
+}
+
 </script>
 
 </body>
