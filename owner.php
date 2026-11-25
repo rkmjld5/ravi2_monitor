@@ -478,7 +478,15 @@ $result = $conn->query(
       )
      ORDER BY p.patient_id, w.username"
 );
-while ($row = $result->fetch_assoc()) $patient_logins[] = $row;
+// Check the SQL result before reading rows. If the query fails, show the
+// actual database error instead of causing a fetch_assoc() fatal error.
+if (!$result) {
+    die("Section 6 (Patient Login Accounts) SQL Error: " . htmlspecialchars($conn->error, ENT_QUOTES, 'UTF-8'));
+}
+
+while ($row = $result->fetch_assoc()) {
+    $patient_logins[] = $row;
+}
 
 ?>
 <!DOCTYPE html>
