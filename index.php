@@ -1,4 +1,3 @@
-
 <?php
 /*
     PROJECT: ravi2_patient
